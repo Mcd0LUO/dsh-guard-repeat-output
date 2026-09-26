@@ -1,6 +1,6 @@
 {
   "name": "dsh-guard-repeat-output",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Host-side degenerate-repetition guard for DSH: detects repetition collapse in a streaming model reply, truncates the stream at the collapse point, and drives the agent to continue from there.",
   "type": "module",
   "main": "index.js",

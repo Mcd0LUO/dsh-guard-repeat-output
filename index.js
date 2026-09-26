@@ -772,6 +772,9 @@ export function apply(ctx, config) {
         perturbedTo: undefined,
         /** Set while a perturbation is outstanding and must be undone. */
         restorePending: false,
+        /** The turn at whose end the restore becomes due. Until that turn ends the
+         *  lowered rung stands, so a long turn cannot thrash between rungs. */
+        restoreTurn: undefined,
       }
       states.set(agent, state)
     }
@@ -1195,21 +1198,29 @@ export function apply(ctx, config) {
    * is re-logged whenever the config CHANGES (reason `change`), after which
    * every later request derives from it. So a perturbation is NOT confined to
    * one attempt — without an explicit restore, the session stays on the lowered
-   * rung for the rest of its life. The next request after the perturbed one
-   * therefore returns the route to the effort it had before the collapse.
+   * rung for the rest of its life.
+   *
+   * The restore is therefore deferred to the TURN BOUNDARY, implemented by
+   * comparing the turn number: within the collapsing turn the lowered rung
+   * stands (so a long turn cannot thrash back to the effort that just
+   * collapsed), and the first request of the next turn restores it. That is the
+   * earliest moment the effort can change anyway — it is only settable from this
+   * waterfall — so no separate turn-end hook is needed.
    */
   ctx.on('agent/request', ({ agent }, next) => {
     const state = stateFor(agent)
     return next().then(async config => {
-      // No new collapse: this is the recovery point. Restore before the lowered
-      // value can be observed by anything downstream.
+      // No new collapse: restore, but only once the collapsing turn has ended.
       if (!state.perturb) {
         if (!state.restorePending) return config
+        const dueTurn = state.restoreTurn
+        if (dueTurn === undefined || (state.turn ?? 0) <= dueTurn) return config
         const base = state.baseEffort
         const lowered = state.perturbedTo
         state.restorePending = false
         state.baseEffort = undefined
         state.perturbedTo = undefined
+        state.restoreTurn = undefined
         // Something else (a user, a model switch) replaced the lowered value:
         // that choice wins over the guard's memory of the pre-collapse effort.
         if (lowered !== undefined && String(config?.reasoningEffort ?? '') !== lowered) return config
@@ -1235,6 +1246,9 @@ export function apply(ctx, config) {
       if (state.baseEffort === undefined) state.baseEffort = String(current)
       state.perturbedTo = ladder[index + 1]
       state.restorePending = true
+      // The restore becomes due when this turn ends. `state.turn` is set by
+      // `agent/pre-step`; a collapse always happens inside a turn, so it is set.
+      state.restoreTurn = state.turn ?? undefined
       return { ...config, reasoningEffort: ladder[index + 1] }
     })
   })

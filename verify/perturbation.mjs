@@ -1,13 +1,17 @@
-// Perturbation and recovery: a lowered effort must last ONE attempt, not the session.
+// Perturbation and recovery: a lowered effort lasts ONE TURN, not the session.
 //
-// Regression context. The guard lowers reasoning effort on a collapsed retry, and the
-// agent loop writes that value into `request/header` (reason "change"), then derives
-// every later request from it. Before recovery existed, one collapse left the session
-// on the lowered rung permanently: a live session dropped to "low" at seq=4178 and ran
-// its remaining 12 steps there.
+// Regression context, both halves from real traffic:
 //
-// These checks drive the REAL listeners, so they fail if either the ladder derivation
-// or the recovery regresses.
+//  1. The loop writes a perturbed effort into `request/header` (reason "change") and
+//     derives every later request from it. Before recovery existed, one collapse left
+//     the session on the lowered rung permanently — a live session dropped to "low"
+//     and ran its remaining 12 steps there.
+//  2. The ladder was hard-coded. The observed adapter declares off/low/high/max and
+//     NOT medium, so stepping "high" down to "medium" threw
+//     UNSUPPORTED_REASONING_EFFORT and killed the turn. That is exactly how 8 real
+//     turns died ("does not support reasoning effort \"medium\"").
+//
+// These checks drive the REAL listeners, so they fail if either half regresses.
 import { RepetitionGuard } from '../index.js'
 
 const results = []
@@ -58,6 +62,14 @@ async function runStream(listeners, text, provider = 'deepseek', model = 'deepse
   return yielded
 }
 
+/** Enter a step, as the loop does before every request. This is what advances the turn. */
+async function preStep(listeners, agent, turn) {
+  const listener = listeners.get('agent/pre-step')
+  const payload = { agent, messages: [], turn, step: 1, signal: new AbortController().signal }
+  const fallback = () => Promise.resolve({ kind: 'enter', messages: [] })
+  return listener === undefined ? fallback() : listener(payload, fallback)
+}
+
 /** Drive agent/request exactly as the loop does (waterfall with a seed config). */
 async function request(listeners, agent, config) {
   return listeners.get('agent/request')({ agent }, () => Promise.resolve(config))
@@ -66,14 +78,16 @@ async function request(listeners, agent, config) {
 // A text that trips the detector: one short phrase repeated far past the threshold.
 const collapse = ('let me write the call. ').repeat(400)
 
-/* ---- 1. Ladder derivation ------------------------------------------------ */
+/* ---- 1. Ladder derivation: adapter order is not strength order ----------- */
 
 {
   const { listeners, agent } = buildHarness(await import('../index.js'), { truncate: true })
+  await preStep(listeners, agent, 1)
   await runStream(listeners, collapse)
 
-  // The adapter declares [off, low, high, max] — array order is NOT strength order.
-  // "Step down" from max must therefore land on high, not on low.
+  // The adapter declares [off, low, high, max]. "Step down" from max must land on
+  // high; taking the array's next entry would have landed on nothing sensible, and
+  // the old hard-coded ladder would have proposed "medium" (which does not exist).
   const out = await request(listeners, agent, {
     provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'max',
   })
@@ -81,42 +95,67 @@ const collapse = ('let me write the call. ').repeat(400)
     out.reasoningEffort === 'high', `max -> ${out.reasoningEffort} (want high)`)
 }
 
-/* ---- 2. Recovery --------------------------------------------------------- */
+/* ---- 2. The lowered rung holds for the rest of the collapsing turn ------- */
 
 {
   const { listeners, agent } = buildHarness(await import('../index.js'), { truncate: true })
   const seed = { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'max' }
 
+  await preStep(listeners, agent, 1)
   await runStream(listeners, collapse)
   const lowered = await request(listeners, agent, { ...seed })
-  const restored = await request(listeners, agent, { ...seed, reasoningEffort: lowered.reasoningEffort })
+  // Another request inside the SAME turn must not bounce back to the rung that
+  // just collapsed.
+  const sameTurn = await request(listeners, agent, {
+    ...seed, reasoningEffort: lowered.reasoningEffort,
+  })
 
   check('the perturbation lowers the rung', lowered.reasoningEffort === 'high',
     `got ${lowered.reasoningEffort}`)
-  check('the next request restores the original effort', restored.reasoningEffort === 'max',
-    `got ${restored.reasoningEffort}`)
+  check('a later request in the same turn stays on the lowered rung',
+    sameTurn.reasoningEffort === 'high', `got ${sameTurn.reasoningEffort}`)
 }
 
-/* ---- 3. Recovery does not fight an external change ----------------------- */
+/* ---- 3. The next turn restores the original rung ------------------------- */
 
 {
   const { listeners, agent } = buildHarness(await import('../index.js'), { truncate: true })
   const seed = { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'max' }
 
+  await preStep(listeners, agent, 1)
   await runStream(listeners, collapse)
   const lowered = await request(listeners, agent, { ...seed })
-  // Someone else moved the effort while the perturbation was outstanding.
-  const external = await request(listeners, agent, {
-    ...seed, reasoningEffort: 'off',
+  // The turn ends; the next turn begins.
+  await preStep(listeners, agent, 2)
+  const restored = await request(listeners, agent, {
+    ...seed, reasoningEffort: lowered.reasoningEffort,
   })
+
+  check('the next turn restores the original effort', restored.reasoningEffort === 'max',
+    `got ${restored.reasoningEffort}`)
+}
+
+/* ---- 4. Recovery does not fight an external change ----------------------- */
+
+{
+  const { listeners, agent } = buildHarness(await import('../index.js'), { truncate: true })
+  const seed = { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'max' }
+
+  await preStep(listeners, agent, 1)
+  await runStream(listeners, collapse)
+  await request(listeners, agent, { ...seed })
+  await preStep(listeners, agent, 2)
+  // Someone else moved the effort while the perturbation was outstanding.
+  const external = await request(listeners, agent, { ...seed, reasoningEffort: 'off' })
   check('an externally chosen effort is not overwritten by recovery',
     external.reasoningEffort === 'off', `got ${external.reasoningEffort}`)
 }
 
-/* ---- 4. A model with no reasoning support is left alone ------------------ */
+/* ---- 5. A model that declares no reasoning support is left alone --------- */
 
 {
   const { listeners, agent } = buildHarness(await import('../index.js'), { truncate: true }, { efforts: [] })
+  await preStep(listeners, agent, 1)
   await runStream(listeners, collapse)
   const out = await request(listeners, agent, {
     provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'max',
@@ -125,24 +164,42 @@ const collapse = ('let me write the call. ').repeat(400)
     out.reasoningEffort === 'max', `got ${out.reasoningEffort}`)
 }
 
-/* ---- 5. Repeated collapses still recover to the ORIGINAL rung ------------ */
+/* ---- 6. Two collapses in one turn still recover to the ORIGINAL rung ----- */
 
 {
   const { listeners, agent } = buildHarness(await import('../index.js'), {
-    truncate: true, maxDegenerationRetries: 5
+    truncate: true, maxDegenerationRetries: 5,
   })
   const seed = { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'max' }
 
+  await preStep(listeners, agent, 1)
   await runStream(listeners, collapse)
   const first = await request(listeners, agent, { ...seed })
   await runStream(listeners, collapse)
   const second = await request(listeners, agent, { ...seed, reasoningEffort: first.reasoningEffort })
+
+  await preStep(listeners, agent, 2)
   const after = await request(listeners, agent, { ...seed, reasoningEffort: second.reasoningEffort })
 
   check('a second collapse steps down again', second.reasoningEffort === 'low',
     `high -> ${second.reasoningEffort}`)
   check('recovery after two collapses returns to the original rung',
     after.reasoningEffort === 'max', `got ${after.reasoningEffort}`)
+}
+
+/* ---- 7. A one-rung model never gets an unsupported effort ---------------- */
+
+{
+  // Only "high" is declared. There is nothing to step down to, and the old
+  // hard-coded ladder would have proposed "medium" here — the real dead turn.
+  const { listeners, agent } = buildHarness(await import('../index.js'), { truncate: true }, { efforts: ['high'] })
+  await preStep(listeners, agent, 1)
+  await runStream(listeners, collapse)
+  const out = await request(listeners, agent, {
+    provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high',
+  })
+  check('a single-rung model is left on its only rung (no unsupported proposal)',
+    out.reasoningEffort === 'high', `got ${out.reasoningEffort}`)
 }
 
 console.log(results.join('\n'))
