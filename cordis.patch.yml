@@ -51,27 +51,14 @@
         # attempt is settled as `assistant/attempt`, never `assistant/message`,
         # so none of the collapsed text enters the context — which is what v1
         # could not achieve (11 of 111 surviving blocks still convicted).
-        # The retry is perturbed, because an identical request tends to
-        # reproduce the identical collapse.
+        #
+        # The retry deliberately does NOT change the reasoning effort. That was
+        # tried and measured: of 16 real convictions, 6 of the 9 sessions that
+        # were successfully lowered collapsed again anyway (67%), so the lowering
+        # conferred no immunity — the discard-and-regenerate is what works. It
+        # also cost 8 dead turns, each an adapter rejecting a rung the model does
+        # not declare ("does not support reasoning effort \"medium\"").
         maxDegenerationRetries: 2
-
-        # FALLBACK perturbation ladder, used only when the adapter cannot be
-        # queried for the exact model's declared efforts. Normally the ladder is
-        # derived from the adapter's own declaration, so the guard never proposes
-        # a rung the model lacks (an undeclared rung throws
-        # UNSUPPORTED_REASONING_EFFORT and turns a caught collapse into a dead
-        # turn). Ordered strongest-first; 'medium' is omitted because the
-        # observed DeepSeek adapter does not declare it.
-        #
-        # Reasoning effort is used instead of temperature because the observed
-        # route sets NO temperature (adapter default, unknown), so any absolute
-        # value could be LOWER than the default and deepen the loop — repetition
-        # is typically a low-temperature failure. Lowering effort also directly
-        # shortens the channel that collapses.
-        #
-        # The lowered effort is restored on the next request, so a collapse costs
-        # one attempt at a lower rung rather than the rest of the session.
-        perturbEfforts: ['max', 'high', 'low', 'off']
 
         # Sidecar copies of collapsed text. This is the ONLY surviving record of
         # what was discarded: without it a false positive is unrecoverable and
@@ -93,3 +80,25 @@
         maxTruncationsPerTurn: 1
         # Same portable resolution as copyDir; null disables the log.
         logPath: 'logs/dsh-guard-repeat-output.log'
+        # Layer 1: blacklist filtering. Control characters, U+FFFD, zero-width
+        # filler and lone surrogates never belong in a reply, so they are stripped
+        # from every delta before it is forwarded and can never reach the log.
+        # Unlike repetition this needs no statistical judgement — a blacklist
+        # decides it exactly — so it is always safe. A DENSE burst (a long
+        # unbroken run, or a high share of one delta) is collapse evidence in its
+        # own right: a model that emits 200 NUL bytes in a row is gone, whether or
+        # not it also loops. One stray U+FFFD is a decoding hiccup, not a collapse.
+        sanitizeGarbage: true
+        garbageRunChars: 32
+        garbageRatio: 0.5
+
+        # Register the /guard-cleanup command, which shadows already-persisted
+        # degenerate reasoning so it stops being replayed. The live guard prevents
+        # NEW pollution; this repairs a session poisoned before it was installed.
+        # Measured on a real incident after the guard went live: the active
+        # context still carried 205,942 characters of degenerate reasoning that
+        # every later request replayed — exactly the priming that makes a
+        # collapse recur. Nothing is deleted: the append-only log keeps the
+        # original bytes, and a message owning tool calls is skipped (shadowing it
+        # would orphan its tool results).
+        cleanupCommand: true

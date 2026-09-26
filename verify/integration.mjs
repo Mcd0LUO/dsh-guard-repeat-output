@@ -241,19 +241,23 @@ console.log('\n=== V2 PRIMARY: a collapse discards the attempt and re-issues it 
     v2.inbox.nextStep.length === 0, `${v2.inbox.nextStep.length} message(s)`)
   check('upstream is still cancelled', v2run.sourceClosed === true)
 
-  // The loop then asks the plugin whether to retry, and the retry is perturbed.
+  // The loop then asks the plugin whether to retry.
   const decide = v2.listeners.get('agent/request-error')
   const answer = await decide(
     { agent: v2.agent, turn: 1, step: 1, provider: 'c', failure: finish.reason.failure, retryPolicy: undefined, signal: new AbortController().signal },
     () => Promise.resolve(undefined),
   )
   check('the plugin answers {kind:"retry"}', answer?.kind === 'retry')
-  const perturbed = await v2.listeners.get('agent/request')(
-    { agent: v2.agent, turn: 1, step: 1 },
-    () => Promise.resolve({ provider: 'c', model: 'deepseek-flash', reasoningEffort: 'max' }),
-  )
-  check('the re-issued request is perturbed down one effort rung',
-    perturbed.reasoningEffort === 'high', `got ${perturbed.reasoningEffort}`)
+
+  // The retry must NOT touch the route. Lowering the reasoning effort was tried
+  // and removed: it conferred no immunity (6 of 9 lowered sessions collapsed
+  // again) and cost 8 dead turns when an adapter rejected the proposed rung.
+  // The guard therefore registers no agent/request listener at all.
+  check('the guard does not rewrite the request config',
+    v2.listeners.get('agent/request') === undefined,
+    v2.listeners.get('agent/request') === undefined
+      ? 'no agent/request listener registered'
+      : 'a listener exists and may change the route')
 }
 
 console.log('\n=== SCOPE: non-DeepSeek models are untouched ===')

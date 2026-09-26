@@ -30,11 +30,25 @@ const DELTA = 40
 const WORK = mkdtempSync(join(tmpdir(), 'w1511-mut-'))
 let generation = 0
 
+/**
+ * The plugin's relative imports, made absolute.
+ *
+ * A variant is written to a temp directory, so `./lib/...` would resolve beside
+ * the COPY and fail. Only `index.js` is mutated — the `lib/` modules are used
+ * exactly as shipped — so the imports are rewritten to the real files.
+ */
+const LIB_IMPORTS = [
+  [`'./lib/sanitize.js'`, `'${new URL('../lib/sanitize.js', import.meta.url).href}'`],
+  [`'./lib/cleanup.js'`, `'${new URL('../lib/cleanup.js', import.meta.url).href}'`],
+]
+
 /** Load a (possibly mutated) copy of the plugin as a fresh module. */
 async function loadVariant(source) {
   generation += 1
   const file = join(WORK, `index-${generation}.js`)
-  writeFileSync(file, source)
+  let relocated = source
+  for (const [from, to] of LIB_IMPORTS) relocated = relocated.split(from).join(to)
+  writeFileSync(file, relocated)
   return import(`${pathToFileURL(file).href}?v=${generation}`)
 }
 

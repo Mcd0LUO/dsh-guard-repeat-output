@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.1.0
+
+Ported the two capabilities of the earlier `@local/dsh-degeneration-guard` so that
+replacing it with this package loses nothing.
+
+- **Blacklist sanitization** (`lib/sanitize.js`). Control characters, U+FFFD,
+  zero-width filler and lone surrogates are stripped from every delta before it is
+  forwarded, so they can never reach the session log. A *dense* burst (an unbroken
+  run of `garbageRunChars`, or a `garbageRatio` share of one delta) is treated as
+  collapse evidence in its own right; a single stray U+FFFD is a decoding hiccup and
+  is cleaned silently. Configure with `sanitizeGarbage`, `garbageRunChars`,
+  `garbageRatio`.
+- **Retroactive cleanup** (`lib/cleanup.js`, `/guard-cleanup`). Scans the session
+  log for degenerate reasoning that is already persisted and shadows it with a short
+  note, so the next request stops replaying it. Nothing is deleted — the append-only
+  log keeps the original bytes. A message that owns tool calls is skipped rather than
+  shadowed, because shadowing it would orphan its `tool/result` replies.
+- **The offline scan reuses the live detector** rather than a second implementation,
+  so the two can never disagree about what "degenerate" means. This is the one
+  deliberate departure from the original module, which had its own detector class.
+- `DEFAULTS` is now exported so tests exercise the real thresholds instead of a copy.
+- `files` includes `lib`, so the new modules ship. This is the same class of
+  packaging mistake that caused an earlier crash-loop: a declared entry point whose
+  file is absent from the tarball.
+
+
+## 2.0.0
+
+**Breaking: the retry no longer changes the reasoning effort.**
+
+- **Removed effort perturbation.** The guard re-issues a collapsed attempt with the
+  route unchanged. Measured against real traffic before removing it: of 16
+  convictions, 6 of the 9 sessions that were successfully lowered collapsed again
+  anyway (67%), so the lowering conferred no immunity and the discard-and-regenerate
+  is what does the work. It also cost 8 dead turns, each an adapter rejecting a rung
+  the model does not declare (`does not support reasoning effort "medium"`). A guard
+  whose recovery can kill the turn is worse than one that only discards.
+- **Removed the `perturbEfforts` option** and the `agent/request` listener. The
+  guard no longer rewrites the request config at all, so it cannot fail a turn by
+  proposing an unsupported effort.
+- **Added `exports` entries** for `./cordis.patch.yml` and `./package.json`, matching
+  every other plugin and the official bundles. This does not affect mounting — DSH
+  resolves a bundle's patch with `join(packageDir, file)`, not through `exports` —
+  but it makes the package consistent for tooling that reads them.
+- `verify/effort-necessity.mjs` is kept so the measurement above stays falsifiable.
+
+
 ## 1.3.0
 
 - **The lowered rung now lasts exactly one turn.** Recovery moved from "the next

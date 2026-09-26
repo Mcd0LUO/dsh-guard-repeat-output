@@ -90,6 +90,8 @@
 
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve, win32 } from 'node:path'
+import { sanitizeText, isSevereGarbage } from './lib/sanitize.js'
+import { findDegenerateMessages, cleanupNote } from './lib/cleanup.js'
 
 /** Plugin id used by Loader diagnostics and stamped on the messages this plugin injects. */
 export const name = 'guard-repeat-output'
@@ -142,7 +144,7 @@ export function expandConfiguredPath(value) {
 }
 
 /** Default tunables; the shipped patch sets these explicitly too. */
-const DEFAULTS = Object.freeze({
+export const DEFAULTS = Object.freeze({
   windowChars: 2400,
   minWindowChars: 1200,
   minSegments: 24,
@@ -182,32 +184,19 @@ const DEFAULTS = Object.freeze({
   truncateChannels: Object.freeze(['reasoning']),
   /**
    * How many times a collapsed attempt may be DISCARDED and re-issued. The
-   * attempt never becomes a message, so the context is untouched; the retry is
-   * perturbed (see `perturbEfforts`) because an identical request tends to
-   * reproduce the identical collapse. The perturbed effort is restored on the
-   * next request, so the lowering lasts one attempt, not the session.
-   * On exhaustion the guard stops cleanly and asks the model to wrap up rather
-   * than failing the turn.
+   * attempt never becomes a message, so the context is untouched: the retry is a
+   * clean regeneration with the same route. On exhaustion the guard stops
+   * cleanly and asks the model to wrap up rather than failing the turn.
+   *
+   * The retry deliberately does NOT change the reasoning effort. That was tried
+   * and measured: across 16 real convictions, 6 of the 9 sessions that were
+   * successfully lowered collapsed again anyway (67%), so the lowering conferred
+   * no immunity and the discard-and-regenerate is what does the work. It also
+   * cost 8 dead turns, every one an adapter rejecting an effort the model does
+   * not declare (`does not support reasoning effort "medium"`). A guard whose
+   * recovery can kill the turn is worse than one that only discards.
    */
   maxDegenerationRetries: 2,
-  /**
-   * Fallback reasoning-effort ladder, used ONLY when the adapter cannot be
-   * queried for the exact model's declared efforts.
-   *
-   * Normally the ladder is derived from the adapter's own declaration (see
-   * `resolveLadder`), so the guard can never propose a rung the model lacks.
-   * A hard-coded ladder cannot know that, and proposing an undeclared rung
-   * throws UNSUPPORTED_REASONING_EFFORT — turning a caught collapse into a dead
-   * turn. This default is ordered strongest-first and deliberately omits
-   * `medium`, which the observed DeepSeek adapter does not declare.
-   *
-   * Reasoning effort is used instead of temperature because the observed route
-   * sets no temperature at all (adapter default, unknown), so any absolute
-   * value could be LOWER than the default and deepen the loop — repetition is
-   * typically a low-temperature failure. Lowering effort also directly shortens
-   * the channel that collapses.
-   */
-  perturbEfforts: Object.freeze(['max', 'high', 'low', 'off']),
   /**
    * Directory for copies of collapsed text. A copy is the ONLY surviving record
    * of what was discarded — without it a false positive is unrecoverable and the
@@ -221,6 +210,24 @@ const DEFAULTS = Object.freeze({
   continueOnTruncate: true,
   maxTruncationsPerTurn: 1,
   logPath: null,
+  /**
+   * Strip blacklisted code points (control characters, U+FFFD, zero-width
+   * filler, lone surrogates) from every delta before it is forwarded, so they
+   * can never reach the session log. This is the one layer that needs no
+   * statistical judgement: these code points carry no meaning in model output,
+   * so removing them is always safe.
+   */
+  sanitizeGarbage: true,
+  /** An unbroken garbage run this long marks the delta as collapse evidence. */
+  garbageRunChars: 32,
+  /** A garbage share this high within one delta marks it as collapse evidence. */
+  garbageRatio: 0.5,
+  /**
+   * Register the `/guard-cleanup` command, which shadows already-persisted
+   * degenerate reasoning so it stops being replayed. The live guard prevents new
+   * pollution; this repairs a session that was poisoned before it was installed.
+   */
+  cleanupCommand: true,
 })
 
 /* ------------------------------------------------------------------ *
@@ -629,6 +636,22 @@ function isOurs(message) {
     || (source?.kind === 'plugin' && source.plugin === SOURCE_PLUGIN)
 }
 
+/**
+ * One-line human description of a conviction, valid for both conviction kinds.
+ *
+ * Repetition evidence carries a phrase and a count; garbage evidence carries a
+ * removed-character count instead. Interpolating the repetition fields blindly
+ * would render "undefined" for the garbage case.
+ */
+function describeEvidence(evidence) {
+  if (evidence.kind === 'garbage') {
+    return `degenerate output in ${evidence.channel}: `
+      + `${evidence.removed ?? 0} blacklisted code units stripped`
+  }
+  return `degenerate repetition in ${evidence.channel}: `
+    + `"${evidence.topPhrase}" repeated ${evidence.topPhraseCount} times`
+}
+
 /** The instruction handed back to the model after a truncation. */
 function continuationText(evidence) {
   const where = evidence.channel === 'reasoning' ? 'reasoning channel' : 'reply text'
@@ -713,7 +736,7 @@ function resolveConfig(raw) {
   if (!Number.isInteger(resolved.maxDegenerationRetries) || resolved.maxDegenerationRetries < 0) {
     throw new Error(`${name}: \`maxDegenerationRetries\` must be an integer >= 0`)
   }
-  for (const key of ['truncateChannels', 'perturbEfforts']) {
+  for (const key of ['truncateChannels']) {
     if (!Array.isArray(resolved[key]) || resolved[key].some(v => typeof v !== 'string')) {
       throw new Error(`${name}: \`${key}\` must be an array of strings`)
     }
@@ -729,6 +752,17 @@ function resolveConfig(raw) {
   }
   if (resolved.minWindowChars > resolved.windowChars) {
     throw new Error(`${name}: \`minWindowChars\` must not exceed \`windowChars\``)
+  }
+  if (!Number.isInteger(resolved.garbageRunChars) || resolved.garbageRunChars < 1) {
+    throw new Error(`${name}: \`garbageRunChars\` must be an integer >= 1`)
+  }
+  if (typeof resolved.garbageRatio !== 'number' || resolved.garbageRatio < 0 || resolved.garbageRatio > 1) {
+    throw new Error(`${name}: \`garbageRatio\` must be a number in [0,1], got ${String(resolved.garbageRatio)}`)
+  }
+  for (const key of ['sanitizeGarbage', 'cleanupCommand']) {
+    if (typeof resolved[key] !== 'boolean') {
+      throw new Error(`${name}: \`${key}\` must be a boolean`)
+    }
   }
   // Paths are expanded once, here, so every consumer receives an absolute
   // platform-native path. A relative value is taken relative to the harness
@@ -763,18 +797,6 @@ export function apply(ctx, config) {
         truncations: 0,
         /** Discard-and-retry attempts used in the current step. */
         retries: 0,
-        /** Set when the next request should be perturbed. */
-        perturb: false,
-        /** Effort to return to once the perturbation series ends. */
-        baseEffort: undefined,
-        /** The effort this guard actually set, so recovery can tell whether the
-         *  lowered value is still ours or was replaced by something else. */
-        perturbedTo: undefined,
-        /** Set while a perturbation is outstanding and must be undone. */
-        restorePending: false,
-        /** The turn at whose end the restore becomes due. Until that turn ends the
-         *  lowered rung stands, so a long turn cannot thrash between rungs. */
-        restoreTurn: undefined,
       }
       states.set(agent, state)
     }
@@ -822,12 +844,20 @@ export function apply(ctx, config) {
       turn: state.turn,
       channel: evidence.channel,
       kind: evidence.kind,
-      topPhrase: evidence.topPhrase,
-      topPhraseCount: evidence.topPhraseCount,
-      longestRun: evidence.longestRun,
-      segments: evidence.segments,
-      duplicateShare: Number(evidence.duplicateShare.toFixed(4)),
-      uniqueGramRatio: Number(evidence.uniqueGramRatio.toFixed(4)),
+      topPhrase: evidence.topPhrase ?? '',
+      topPhraseCount: evidence.topPhraseCount ?? 0,
+      longestRun: evidence.longestRun ?? 0,
+      ...evidence.segments === undefined ? {} : { segments: evidence.segments },
+      // Evidence also arrives from the garbage filter, which has no window
+      // statistics. Absent numbers are omitted rather than logged as NaN.
+      ...Number.isFinite(evidence.duplicateShare)
+        ? { duplicateShare: Number(evidence.duplicateShare.toFixed(4)) }
+        : {},
+      ...Number.isFinite(evidence.uniqueGramRatio)
+        ? { uniqueGramRatio: Number(evidence.uniqueGramRatio.toFixed(4)) }
+        : {},
+      ...Number.isFinite(evidence.removed) ? { removed: evidence.removed } : {},
+      ...Number.isFinite(evidence.maxRun) ? { maxRun: evidence.maxRun } : {},
       seenChars,
       prunedChars,
       elapsedMs: Date.now() - startedAt,
@@ -991,13 +1021,41 @@ export function apply(ctx, config) {
         }
 
         heldChannel = channel
-        const text = typeof chunk.text === 'string' ? chunk.text : ''
+        let effective = chunk
+        let text = typeof chunk.text === 'string' ? chunk.text : ''
+
+        // Layer 1: blacklist filtering. Control characters, U+FFFD, zero-width
+        // filler and lone surrogates never belong in a reply, so they are
+        // stripped before the text reaches the log. Unlike repetition this needs
+        // no statistical judgement — a blacklist decides it exactly — and a dense
+        // burst is collapse evidence in its own right (a model that emits 200 NUL
+        // bytes in a row is gone, whether or not it also loops).
+        let garbageSevere = false
+        let garbageEvidence = null
+        if (thresholds.sanitizeGarbage && text.length > 0) {
+          const cleaned = sanitizeText(text)
+          if (cleaned.removed > 0) {
+            garbageSevere = isSevereGarbage(cleaned, thresholds.garbageRunChars, thresholds.garbageRatio)
+            text = cleaned.text
+            // A chunk is producer-owned and may be frozen, so never mutate it.
+            effective = { ...chunk, text }
+            garbageEvidence = {
+              kind: 'garbage', channel,
+              removed: cleaned.removed, maxRun: cleaned.maxRun,
+              duplicateShare: cleaned.ratio,
+            }
+            if (garbageSevere) {
+              logConviction(state, garbageEvidence, options, agent, seenChars, startedAt, false, 0, 'garbage-collapse')
+            }
+          }
+        }
+
         seenChars += text.length
         if (attemptText.length < attemptCap) attemptText += text
-        pending.push(chunk)
+        pending.push(effective)
         heldText += text.length
 
-        const evidence = guard.push(text, channel)
+        const evidence = garbageSevere ? garbageEvidence : guard.push(text, channel)
 
         // Observe-only for this channel: log it and let the stream through
         // untouched. `text` is observe-only by default because 59/59 natural
@@ -1027,7 +1085,6 @@ export function apply(ctx, config) {
 
         if (retriesLeft) {
           state.retries += 1
-          state.perturb = true
           logConviction(state, evidence, options, agent, seenChars, startedAt, false, 0, 'discard-and-retry')
           void saveCopy(state, evidence, options, agent, attemptText)
           truncated = true
@@ -1036,8 +1093,7 @@ export function apply(ctx, config) {
             reason: {
               kind: 'error',
               failure: {
-                message: `degenerate repetition in ${evidence.channel}: `
-                  + `"${evidence.topPhrase}" repeated ${evidence.topPhraseCount} times`,
+                message: describeEvidence(evidence),
                 code: DEGENERATION_CODE,
               },
             },
@@ -1108,157 +1164,11 @@ export function apply(ctx, config) {
     return { kind: 'retry' }
   })
 
-  /**
-   * The reasoning efforts the EXACT model advertises, or `null` when the
-   * capability cannot be established.
-   *
-   * A hard-coded effort ladder is a trap: a model may declare only a subset of
-   * the rungs (for example `high`/`low`/`max`/`off`, with no `medium`), so stepping
-   * `high` down to an undeclared rung throws UNSUPPORTED_REASONING_EFFORT and
-   * converts a caught collapse into a dead turn. Observed live: a turn carried a
-   * `discard-and-retry` conviction immediately before such a failure. This is
-   * why the perturbation ladder is DERIVED from the list returned here rather
-   * than taken from configuration.
-   *
-   * Three outcomes, and the caller MUST tell them apart:
-   *   - a non-empty id list -> perturb, but only onto one of these rungs;
-   *   - `[]`  -> the adapter positively reports NO reasoning support, so setting
-   *     any effort throws UNSUPPORTED_REASONING_EFFORT. Perturbation is skipped;
-   *     treating this as "unknown" would reintroduce the dead turn;
-   *   - `null` -> capability UNKNOWN (no `llm` service, no `resolveModelInfo`, or
-   *     the query threw). Fails OPEN to the configured ladder: a query that
-   *     cannot run must not silently disable perturbation altogether.
-   */
-  async function supportedEfforts(config) {
-    const provider = config?.provider
-    const model = config?.model
-    if (typeof provider !== 'string' || typeof model !== 'string') return null
-    try {
-      const llm = ctx.get('llm')
-      if (llm === undefined || typeof llm.resolveModelInfo !== 'function') return null
-      const info = await llm.resolveModelInfo(provider, model)
-      const reasoning = info?.reasoning
-      // Absent reasoning metadata is an authoritative "this model does not
-      // reason", not an unknown: requesting an effort for it is an error.
-      if (reasoning === undefined || reasoning === false) return []
-      const efforts = reasoning.efforts
-      if (!Array.isArray(efforts)) return []
-      return efforts
-        .map(effort => (typeof effort === 'string' ? effort : effort?.id))
-        .filter(id => typeof id === 'string' && id.length > 0)
-    } catch {
-      // A failed query is genuinely unknown, so fall back to the configured ladder.
-      return null
-    }
-  }
-
-  /**
-   * Semantic strength of the effort ids the adapters use, weakest first.
-   *
-   * The adapter's declared array order is NOT a strength order — the observed
-   * DeepSeek adapter declares `[off, low, high, max]` while another may declare
-   * them any way it likes — so "step down" must be computed from this rank, not
-   * from array position.
-   */
-  const EFFORT_RANK = Object.freeze({ off: 0, minimal: 0, low: 1, medium: 2, high: 3, max: 4 })
-
-  /**
-   * Order adapter-declared efforts strongest-first, so stepping to the next
-   * entry is a genuine step DOWN. An id with no known rank is kept but placed
-   * last: it is adapter-declared and therefore safe to set, and any change
-   * breaks the repetition loop.
-   */
-  function orderEfforts(efforts) {
-    return [...efforts].sort((a, b) => (EFFORT_RANK[b] ?? -1) - (EFFORT_RANK[a] ?? -1))
-  }
-
-  /**
-   * The perturbation ladder, strongest-first.
-   *
-   * Derived from the adapter's own declaration for the exact model, so the guard
-   * cannot propose a rung the model does not offer — which would throw
-   * UNSUPPORTED_REASONING_EFFORT and turn a caught collapse into a dead turn.
-   * `perturbEfforts` is the fallback for when the capability cannot be queried.
-   *
-   * @param supported - adapter-declared ids, or null when unknown.
-   */
-  function resolveLadder(supported) {
-    if (supported === null || supported.length === 0) return thresholds.perturbEfforts
-    return orderEfforts(supported)
-  }
-
-  /**
-   * Perturb a re-issued request, then put the route back.
-   *
-   * Fires on EVERY attempt (the loop calls `prepareRequest` at the top of its
-   * retry loop), so the flag is consumed here and the perturbation applies to
-   * the one attempt that follows a collapse.
-   *
-   * Recovery: a lowered effort is written into `request/header` and the header
-   * is re-logged whenever the config CHANGES (reason `change`), after which
-   * every later request derives from it. So a perturbation is NOT confined to
-   * one attempt — without an explicit restore, the session stays on the lowered
-   * rung for the rest of its life.
-   *
-   * The restore is therefore deferred to the TURN BOUNDARY, implemented by
-   * comparing the turn number: within the collapsing turn the lowered rung
-   * stands (so a long turn cannot thrash back to the effort that just
-   * collapsed), and the first request of the next turn restores it. That is the
-   * earliest moment the effort can change anyway — it is only settable from this
-   * waterfall — so no separate turn-end hook is needed.
-   */
-  ctx.on('agent/request', ({ agent }, next) => {
-    const state = stateFor(agent)
-    return next().then(async config => {
-      // No new collapse: restore, but only once the collapsing turn has ended.
-      if (!state.perturb) {
-        if (!state.restorePending) return config
-        const dueTurn = state.restoreTurn
-        if (dueTurn === undefined || (state.turn ?? 0) <= dueTurn) return config
-        const base = state.baseEffort
-        const lowered = state.perturbedTo
-        state.restorePending = false
-        state.baseEffort = undefined
-        state.perturbedTo = undefined
-        state.restoreTurn = undefined
-        // Something else (a user, a model switch) replaced the lowered value:
-        // that choice wins over the guard's memory of the pre-collapse effort.
-        if (lowered !== undefined && String(config?.reasoningEffort ?? '') !== lowered) return config
-        if (base === undefined || base === config?.reasoningEffort) return config
-        return { ...config, reasoningEffort: base }
-      }
-
-      state.perturb = false
-      const current = config?.reasoningEffort
-      const supported = await supportedEfforts(config)
-      // Known-and-empty means this model takes no effort at all: any value we
-      // set would be rejected, so leave the route untouched.
-      if (supported !== null && supported.length === 0) return config
-      const ladder = resolveLadder(supported)
-      const index = ladder.indexOf(String(current ?? ''))
-      // Already at the bottom usable rung (or an effort this ladder does not
-      // know): there is nothing to step down to. The route may still hold a
-      // lowered value from an earlier perturbation, so leave recovery armed.
-      if (index === -1 || index === ladder.length - 1) return config
-      // Only the FIRST perturbation of a series records the base: a second
-      // collapse steps down from the already-lowered value, and recovery must
-      // still return to the true original.
-      if (state.baseEffort === undefined) state.baseEffort = String(current)
-      state.perturbedTo = ladder[index + 1]
-      state.restorePending = true
-      // The restore becomes due when this turn ends. `state.turn` is set by
-      // `agent/pre-step`; a collapse always happens inside a turn, so it is set.
-      state.restoreTurn = state.turn ?? undefined
-      return { ...config, reasoningEffort: ladder[index + 1] }
-    })
-  })
-
   ctx.on('agent/pre-step', async ({ agent, messages, turn }, next) => {
     const state = stateFor(agent)
     state.turn = turn
     // A new step is a new request series: the retry budget is per step.
     state.retries = 0
-    state.perturb = false
 
     // A human interjection is new context, so repetition across it is not a
     // collapse: hand the turn a fresh truncation budget.
@@ -1288,4 +1198,105 @@ export function apply(ctx, config) {
       ],
     }
   })
+
+  /**
+   * Retroactive decontamination of one session's already-persisted degenerate
+   * reasoning.
+   *
+   * The stream guard prevents NEW pollution; it cannot help a session that was
+   * poisoned before it was installed. Measured on a real incident: the active
+   * context still carried 205,942 characters of degenerate reasoning that every
+   * subsequent request replayed — exactly the priming that makes a collapse
+   * recur. This shadows those blocks so they leave the model-visible surface,
+   * while the append-only log keeps the original bytes for audit.
+   *
+   * Exposed as a slash command rather than a tool so it costs no tool-schema
+   * tokens in every request: it is a repair action a human runs on a poisoned
+   * session, not something the model should call.
+   */
+  async function runCleanup(invocation) {
+    // Resolved at invocation time, not activation time: the service is optional
+    // and may be mounted after this plugin.
+    const sessionQuery = typeof ctx.get === 'function' ? ctx.get('sessionQuery') : undefined
+    if (sessionQuery === undefined) {
+      return { kind: 'error', text: `${name}: sessionQuery service is not mounted; cannot read session history` }
+    }
+    const session = invocation?.agent?.session
+    if (session === undefined) {
+      return { kind: 'error', text: `${name}: no session on the invoking agent` }
+    }
+    const snapshot = await sessionQuery.readSession(session.id)
+    const found = findDegenerateMessages(snapshot.events, thresholds)
+    if (found.length === 0) {
+      return { kind: 'success', text: `${name}: no degenerate reasoning found in this session.` }
+    }
+
+    // Only messages that are currently surface nodes can be replaced.
+    const surfaceNodes = new Set(session.surface.nodes)
+    let replaced = 0
+    let skippedToolCall = 0
+    let skippedNotOnSurface = 0
+    let removedChars = 0
+
+    for (const entry of found) {
+      if (!surfaceNodes.has(entry.seq)) { skippedNotOnSurface += 1; continue }
+      // SAFETY: shadowing a message that owns tool calls would orphan its
+      // tool/result replies, which providers reject. Verified against the real
+      // surface fold, which accepts the orphan silently — so the danger is real
+      // and is not caught downstream. Runaway reasoning is tool-call free by
+      // nature (the incident's 725KB block produced zero calls).
+      if (entry.hasToolCall) { skippedToolCall += 1; continue }
+      try {
+        session.append('user/message', createContinuationMessage(
+          cleanupNote(entry),
+          `removed ${entry.chars} chars of degenerate reasoning`,
+        ), {
+          surfaceOp: { op: 'replace', startSeq: entry.seq, endSeq: entry.seq },
+          sourceEventSeqs: [entry.seq],
+        })
+        replaced += 1
+        removedChars += entry.chars
+        void appendRecord(thresholds.logPath, {
+          time: new Date().toISOString(),
+          event: 'cleanup',
+          sessionId: session.id,
+          seq: entry.seq,
+          turn: entry.turn,
+          step: entry.step,
+          chars: entry.chars,
+          duplicateShare: Number(entry.evidence.duplicateShare.toFixed(4)),
+          uniqueGramRatio: Number(entry.evidence.uniqueGramRatio.toFixed(4)),
+        })
+      } catch (error) {
+        ctx.logger?.warn?.(`${name}: cleanup failed for seq ${entry.seq}: ${String(error)}`)
+      }
+    }
+
+    const parts = [
+      `${name}: scanned ${snapshot.events.length} events, found ${found.length} degenerate reasoning block(s).`,
+      `Removed ${replaced} (${removedChars} chars) from the model-visible surface.`,
+    ]
+    if (skippedToolCall > 0) parts.push(`Skipped ${skippedToolCall} that own tool calls (shadowing them would orphan their results).`)
+    if (skippedNotOnSurface > 0) parts.push(`Skipped ${skippedNotOnSurface} already shadowed.`)
+    parts.push('The original bytes remain in the append-only log.')
+    return { kind: 'success', text: parts.join(' ') }
+  }
+
+  if (thresholds.cleanupCommand) {
+    // `inject` runs the callback once the service exists and disposes it with
+    // this fiber, so registration order relative to the command service does not
+    // matter. Absent `inject` the command is simply not offered.
+    if (typeof ctx.inject !== 'function') {
+      ctx.logger?.info?.(`${name}: \`ctx.inject\` unavailable; /guard-cleanup not registered`)
+    } else {
+      ctx.inject(['commands'], commandCtx => {
+        commandCtx.commands.register({
+          name: 'guard-cleanup',
+          description: 'Remove degenerate reasoning blocks from this session so they stop being replayed',
+          handler: runCleanup,
+        })
+        ctx.logger?.info?.(`${name}: /guard-cleanup registered`)
+      })
+    }
+  }
 }
