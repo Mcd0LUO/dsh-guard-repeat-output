@@ -1,0 +1,42 @@
+{
+  "name": "dsh-guard-repeat-output",
+  "version": "1.1.0",
+  "description": "Host-side degenerate-repetition guard for DSH: detects repetition collapse in a streaming model reply, truncates the stream at the collapse point, and drives the agent to continue from there.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "guard",
+    "repetition",
+    "cordis-plugin"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mcd0LUO/dsh-guard-repeat-output.git"
+  },
+  "homepage": "https://github.com/Mcd0LUO/dsh-guard-repeat-output#readme",
+  "bugs": {
+    "url": "https://github.com/Mcd0LUO/dsh-guard-repeat-output/issues"
+  },
+  "author": "mcd0luo",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

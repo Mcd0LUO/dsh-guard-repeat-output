@@ -1,0 +1,85 @@
+- insert:
+    - id: guard-repeat-output
+      name: 'dsh-guard-repeat-output'
+      config:
+        # Detection thresholds. Every default below is calibrated against real
+        # traffic (see the package header in index.js): 4 real degenerate
+        # samples all convicted, 1708 real legitimate reasoning parts plus 205
+        # real long answers all clean.
+        windowChars: 2400
+        minWindowChars: 1200
+        minSegments: 24
+        minSegmentChars: 12
+        phraseRun: 8
+        phraseTopCount: 10
+        lowInfoDupShare: 0.85
+        maxUniqueGramRatio: 0.30
+        gramK: 5
+        evalEveryChars: 200
+        # Consecutive non-repeated segments tolerated inside a degenerate run
+        # before the onset walk declares the repetition over.
+        onsetGapSegments: 2
+
+        # Precise pruning, used ONLY on the fallback path (retry budget spent).
+        # On the primary path a collapse discards the whole attempt, so there is
+        # no boundary to find. Text is held back this many characters before
+        # release, so the cut can land where the degeneration actually began
+        # rather than at the later, provable conviction point.
+        #
+        # Measured on the frozen corpus (62 real degenerate blocks):
+        #   0    -> 117,894 chars of degenerate text released (13.35% pollution)
+        #   2400 ->  10,520 (1.37%), 36/62 blocks cut exactly at the onset
+        #   4096 ->   5,083 (0.67%), 48/62 exact   <- default
+        #   6144 ->   4,668 (0.61%), 49/62 exact
+        # 4096 keeps ~96% of the pollution out; 6144 buys only 415 more chars for
+        # 2048 more characters of output delay. 0 disables holdback entirely.
+        holdbackChars: 4096
+
+        # Scope: the incident this guard exists for is DeepSeek-family output.
+        # An empty list means "every model".
+        modelIncludes: ['deepseek']
+
+        # Which channels the guard acts on. Everything else is observe-only:
+        # convictions are still logged and copied, but the stream passes through.
+        # `text` is deliberately absent — across 1546 real sessions, 59
+        # convictions landed in `reasoning` and ZERO in `text`, while `text` is
+        # the only channel the user reads, so cutting it has no evidence behind it
+        # and risks truncating a genuine answer.
+        truncateChannels: ['reasoning']
+
+        # Primary path: a collapsed attempt is DISCARDED and re-issued. The
+        # attempt is settled as `assistant/attempt`, never `assistant/message`,
+        # so none of the collapsed text enters the context — which is what v1
+        # could not achieve (11 of 111 surviving blocks still convicted).
+        # The retry is perturbed, because an identical request tends to
+        # reproduce the identical collapse.
+        maxDegenerationRetries: 2
+
+        # Perturbation ladder: the current reasoning effort steps down one rung.
+        # Reasoning effort is used instead of temperature because the observed
+        # route sets NO temperature (adapter default, unknown), so any absolute
+        # value could be LOWER than the default and deepen the loop — repetition
+        # is typically a low-temperature failure. Lowering effort also directly
+        # shortens the channel that collapses.
+        perturbEfforts: ['max', 'high', 'medium', 'low']
+
+        # Sidecar copies of collapsed text. This is the ONLY surviving record of
+        # what was discarded: without it a false positive is unrecoverable and
+        # the corpus cannot grow from live traffic. Never read back into a
+        # request, so it cannot pollute context.
+        #
+        # Portable by default: a relative path resolves under the harness home
+        # ($DSH_HOME, else ~/.dsh) on every platform, so this package does not
+        # assume a Linux layout. '~', '~/x' and '$DSH_HOME/x' are also accepted,
+        # as is any platform's own absolute path. Set null to disable.
+        copyDir: 'logs/guard-repeat-output-pruned'
+        copyMaxChars: 262144
+
+        # Fallback path (retry budget spent): stop cleanly and ask the model to
+        # wrap up, rather than emitting another error finish — which would make
+        # the turn fail with an LlmError.
+        truncate: true
+        continueOnTruncate: true
+        maxTruncationsPerTurn: 1
+        # Same portable resolution as copyDir; null disables the log.
+        logPath: 'logs/dsh-guard-repeat-output.log'
