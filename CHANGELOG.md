@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.1.2
+
+- **The activation line now goes to `console.log`, not `ctx.logger.info`.** The
+  2.1.1 line was written through `ctx.logger` and never appeared: the harness does
+  not surface `logger.info` to the service journal. Confirmed on a live deploy —
+  the line was invisible through `ctx.logger` and visible through `console.log`,
+  which is also what the sibling plugins use for their own startup lines.
+
+## 2.1.1
+
+- **The plugin now logs one activation line.** It was silent on mount, so a
+  mounted plugin and an unmounted one looked identical in the journal — which
+  made "is it actually running?" unanswerable at exactly the moment it matters,
+  right after a deploy. Found while deploying: the only way to confirm the mount
+  was to load the module by hand in the profile directory.
+
 ## 2.1.0
 
 Ported the two capabilities of the earlier `@local/dsh-degeneration-guard` so that

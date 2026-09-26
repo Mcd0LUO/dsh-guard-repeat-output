@@ -1299,4 +1299,19 @@ export function apply(ctx, config) {
       })
     }
   }
+
+  // Announce activation on stdout. Without this line a silently-mounted plugin
+  // and an unmounted one look identical in the journal — which makes "is it
+  // running?" unanswerable exactly when it matters, right after a deploy.
+  //
+  // Deliberately `console.log` rather than `ctx.logger.info`: the harness does
+  // not surface `logger.info` to the service journal. Verified on a live deploy —
+  // this line was invisible through `ctx.logger` and visible through
+  // `console.log`, which is also what the sibling plugins use for their own
+  // startup lines.
+  console.log(
+    `[${name}] active (channels=${thresholds.truncateChannels.join('/')}, `
+    + `retries=${thresholds.maxDegenerationRetries}, sanitize=${thresholds.sanitizeGarbage}, `
+    + `cleanup=${thresholds.cleanupCommand}, logPath=${thresholds.logPath ?? 'null'})`,
+  )
 }
