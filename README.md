@@ -36,8 +36,10 @@ merely truncate — it **discards the collapsed attempt** and retries:
    low-information density, and segment structure.
 2. **Discard** — the collapsed attempt is settled as a log-only event instead of a surfaced
    message, so none of the degenerate text enters derived history.
-3. **Retry with a twist** — the request is re-issued with a *different* reasoning effort.
-   An identical request tends to reproduce an identical collapse.
+3. **Retry with a twist** — the request is re-issued one rung *down* the reasoning ladder the
+   adapter declares for that exact model. An identical request tends to reproduce an identical
+   collapse. The lowered rung lasts **one attempt**: the next request restores the original
+   effort, so a collapse cannot leave the session permanently degraded.
 4. **Wrap up** — once the retry budget is spent, the stream is cut at the estimated onset and
    the model is asked to conclude, so the turn still finishes instead of failing.
 
@@ -69,7 +71,7 @@ measured basis for each default. The ones that matter most:
 | `truncateChannels` | `['reasoning']` | Channels the guard may act on. Everything else is observe-only. |
 | `modelIncludes` | `['deepseek']` | Substring scope for model ids; empty list means every model. |
 | `maxDegenerationRetries` | `2` | Discard-and-retry attempts before falling back to truncation. |
-| `perturbEfforts` | `['max','high','medium','low']` | Effort ladder for perturbation, intersected at runtime with the rungs the adapter actually declares. |
+| `perturbEfforts` | `['max','high','low','off']` | **Fallback** effort ladder. Normally the ladder is derived from the adapter's own declaration for the exact model; this is used only when that query is unavailable. |
 | `holdbackChars` | `4096` | How far before release text is held, so the cut can land at the true onset. |
 | `copyDir` | `null` | Optional sidecar copies of discarded text, for after-the-fact false-positive analysis. Never read back into a request. |
 | `logPath` | `null` | Optional JSONL log of every conviction, for after-the-fact diagnosis. |

@@ -55,13 +55,23 @@
         # reproduce the identical collapse.
         maxDegenerationRetries: 2
 
-        # Perturbation ladder: the current reasoning effort steps down one rung.
+        # FALLBACK perturbation ladder, used only when the adapter cannot be
+        # queried for the exact model's declared efforts. Normally the ladder is
+        # derived from the adapter's own declaration, so the guard never proposes
+        # a rung the model lacks (an undeclared rung throws
+        # UNSUPPORTED_REASONING_EFFORT and turns a caught collapse into a dead
+        # turn). Ordered strongest-first; 'medium' is omitted because the
+        # observed DeepSeek adapter does not declare it.
+        #
         # Reasoning effort is used instead of temperature because the observed
         # route sets NO temperature (adapter default, unknown), so any absolute
         # value could be LOWER than the default and deepen the loop — repetition
         # is typically a low-temperature failure. Lowering effort also directly
         # shortens the channel that collapses.
-        perturbEfforts: ['max', 'high', 'medium', 'low']
+        #
+        # The lowered effort is restored on the next request, so a collapse costs
+        # one attempt at a lower rung rather than the rest of the session.
+        perturbEfforts: ['max', 'high', 'low', 'off']
 
         # Sidecar copies of collapsed text. This is the ONLY surviving record of
         # what was discarded: without it a false positive is unrecoverable and

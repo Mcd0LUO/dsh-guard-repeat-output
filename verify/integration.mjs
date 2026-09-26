@@ -18,7 +18,7 @@
  *
  * The corpus is not shipped: it is real captured model output and stays private.
  * Point <corpusRoot> at any tree containing:
- *   legit/L00001.txt   — healthy reasoning text
+ *   legit/L00001.txt       — healthy reasoning text
  *   unreg/deg1-seq2608.txt — a captured repetition collapse
  */
 import { readFileSync, rmSync, existsSync } from 'node:fs'

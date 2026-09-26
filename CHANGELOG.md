@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.0
+
+- **The perturbation ladder is now derived from the adapter.** The guard asks the
+  provider which reasoning efforts the exact model declares and steps down that
+  list, instead of trusting a hard-coded ladder. A rung the model does not offer
+  throws `UNSUPPORTED_REASONING_EFFORT` and turns a caught collapse into a dead
+  turn, so this removes a class of failure rather than just a value.
+- **The lowered effort is restored on the next request.** A perturbation is
+  written into `request/header` and every later request derives from it, so
+  without an explicit restore one collapse left the session on the lowered rung
+  permanently. A live session dropped to `low` and ran its remaining 12 steps
+  there. Recovery also defers to any externally chosen effort.
+- **Fallback ladder no longer names `medium`.** The observed DeepSeek adapter
+  declares `off`/`low`/`high`/`max`; `medium` was never valid for it. The
+  fallback is now `['max','high','low','off']`, strongest-first.
+- Corrected a source comment that claimed a perturbed config "is never persisted
+  as the session's route". The loop re-logs `request/header` whenever the config
+  changes, so it *is* persisted — which is why recovery is needed.
+
+
 ## 1.1.0
 
 Cross-platform support. The plugin previously assumed a Linux host in five

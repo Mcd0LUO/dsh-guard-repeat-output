@@ -184,19 +184,30 @@ const DEFAULTS = Object.freeze({
    * How many times a collapsed attempt may be DISCARDED and re-issued. The
    * attempt never becomes a message, so the context is untouched; the retry is
    * perturbed (see `perturbEfforts`) because an identical request tends to
-   * reproduce the identical collapse. On exhaustion the guard stops cleanly and
-   * asks the model to wrap up rather than failing the turn.
+   * reproduce the identical collapse. The perturbed effort is restored on the
+   * next request, so the lowering lasts one attempt, not the session.
+   * On exhaustion the guard stops cleanly and asks the model to wrap up rather
+   * than failing the turn.
    */
   maxDegenerationRetries: 2,
   /**
-   * Reasoning-effort ladder used to perturb a retry: the current effort is
-   * stepped down one rung. Reasoning effort is used instead of temperature
-   * because the observed route sets no temperature at all (adapter default,
-   * unknown), so any absolute value could be LOWER than the default and deepen
-   * the loop — repetition is typically a low-temperature failure. Lowering
-   * effort also directly shortens the channel that collapses.
+   * Fallback reasoning-effort ladder, used ONLY when the adapter cannot be
+   * queried for the exact model's declared efforts.
+   *
+   * Normally the ladder is derived from the adapter's own declaration (see
+   * `resolveLadder`), so the guard can never propose a rung the model lacks.
+   * A hard-coded ladder cannot know that, and proposing an undeclared rung
+   * throws UNSUPPORTED_REASONING_EFFORT — turning a caught collapse into a dead
+   * turn. This default is ordered strongest-first and deliberately omits
+   * `medium`, which the observed DeepSeek adapter does not declare.
+   *
+   * Reasoning effort is used instead of temperature because the observed route
+   * sets no temperature at all (adapter default, unknown), so any absolute
+   * value could be LOWER than the default and deepen the loop — repetition is
+   * typically a low-temperature failure. Lowering effort also directly shortens
+   * the channel that collapses.
    */
-  perturbEfforts: Object.freeze(['max', 'high', 'medium', 'low']),
+  perturbEfforts: Object.freeze(['max', 'high', 'low', 'off']),
   /**
    * Directory for copies of collapsed text. A copy is the ONLY surviving record
    * of what was discarded — without it a false positive is unrecoverable and the
@@ -754,6 +765,13 @@ export function apply(ctx, config) {
         retries: 0,
         /** Set when the next request should be perturbed. */
         perturb: false,
+        /** Effort to return to once the perturbation series ends. */
+        baseEffort: undefined,
+        /** The effort this guard actually set, so recovery can tell whether the
+         *  lowered value is still ours or was replaced by something else. */
+        perturbedTo: undefined,
+        /** Set while a perturbation is outstanding and must be undone. */
+        restorePending: false,
       }
       states.set(agent, state)
     }
@@ -1095,7 +1113,9 @@ export function apply(ctx, config) {
    * the rungs (for example `high`/`low`/`max`/`off`, with no `medium`), so stepping
    * `high` down to an undeclared rung throws UNSUPPORTED_REASONING_EFFORT and
    * converts a caught collapse into a dead turn. Observed live: a turn carried a
-   * `discard-and-retry` conviction immediately before such a failure.
+   * `discard-and-retry` conviction immediately before such a failure. This is
+   * why the perturbation ladder is DERIVED from the list returned here rather
+   * than taken from configuration.
    *
    * Three outcomes, and the caller MUST tell them apart:
    *   - a non-empty id list -> perturb, but only onto one of these rungs;
@@ -1130,35 +1150,91 @@ export function apply(ctx, config) {
   }
 
   /**
-   * Perturb a re-issued request so it does not reproduce the same collapse.
+   * Semantic strength of the effort ids the adapters use, weakest first.
+   *
+   * The adapter's declared array order is NOT a strength order — the observed
+   * DeepSeek adapter declares `[off, low, high, max]` while another may declare
+   * them any way it likes — so "step down" must be computed from this rank, not
+   * from array position.
+   */
+  const EFFORT_RANK = Object.freeze({ off: 0, minimal: 0, low: 1, medium: 2, high: 3, max: 4 })
+
+  /**
+   * Order adapter-declared efforts strongest-first, so stepping to the next
+   * entry is a genuine step DOWN. An id with no known rank is kept but placed
+   * last: it is adapter-declared and therefore safe to set, and any change
+   * breaks the repetition loop.
+   */
+  function orderEfforts(efforts) {
+    return [...efforts].sort((a, b) => (EFFORT_RANK[b] ?? -1) - (EFFORT_RANK[a] ?? -1))
+  }
+
+  /**
+   * The perturbation ladder, strongest-first.
+   *
+   * Derived from the adapter's own declaration for the exact model, so the guard
+   * cannot propose a rung the model does not offer — which would throw
+   * UNSUPPORTED_REASONING_EFFORT and turn a caught collapse into a dead turn.
+   * `perturbEfforts` is the fallback for when the capability cannot be queried.
+   *
+   * @param supported - adapter-declared ids, or null when unknown.
+   */
+  function resolveLadder(supported) {
+    if (supported === null || supported.length === 0) return thresholds.perturbEfforts
+    return orderEfforts(supported)
+  }
+
+  /**
+   * Perturb a re-issued request, then put the route back.
    *
    * Fires on EVERY attempt (the loop calls `prepareRequest` at the top of its
-   * retry loop), so the flag is consumed here and the perturbation is confined
-   * to the one attempt that follows a collapse. `request/header` is logged once
-   * per agent, so a perturbed config is never persisted as the session's route.
+   * retry loop), so the flag is consumed here and the perturbation applies to
+   * the one attempt that follows a collapse.
+   *
+   * Recovery: a lowered effort is written into `request/header` and the header
+   * is re-logged whenever the config CHANGES (reason `change`), after which
+   * every later request derives from it. So a perturbation is NOT confined to
+   * one attempt — without an explicit restore, the session stays on the lowered
+   * rung for the rest of its life. The next request after the perturbed one
+   * therefore returns the route to the effort it had before the collapse.
    */
   ctx.on('agent/request', ({ agent }, next) => {
     const state = stateFor(agent)
     return next().then(async config => {
-      if (!state.perturb) return config
+      // No new collapse: this is the recovery point. Restore before the lowered
+      // value can be observed by anything downstream.
+      if (!state.perturb) {
+        if (!state.restorePending) return config
+        const base = state.baseEffort
+        const lowered = state.perturbedTo
+        state.restorePending = false
+        state.baseEffort = undefined
+        state.perturbedTo = undefined
+        // Something else (a user, a model switch) replaced the lowered value:
+        // that choice wins over the guard's memory of the pre-collapse effort.
+        if (lowered !== undefined && String(config?.reasoningEffort ?? '') !== lowered) return config
+        if (base === undefined || base === config?.reasoningEffort) return config
+        return { ...config, reasoningEffort: base }
+      }
+
       state.perturb = false
       const current = config?.reasoningEffort
-      // Step DOWN one rung, because repetition is typically a low-temperature
-      // failure and lowering effort also shortens the channel that collapses.
-      // The ladder is first intersected with the efforts this exact model
-      // advertises, so a rung the adapter would reject is never selected.
       const supported = await supportedEfforts(config)
       // Known-and-empty means this model takes no effort at all: any value we
       // set would be rejected, so leave the route untouched.
       if (supported !== null && supported.length === 0) return config
-      const ladder = supported === null
-        ? thresholds.perturbEfforts
-        : thresholds.perturbEfforts.filter(effort => supported.includes(effort))
+      const ladder = resolveLadder(supported)
       const index = ladder.indexOf(String(current ?? ''))
       // Already at the bottom usable rung (or an effort this ladder does not
-      // know): leave the route alone rather than guessing a value the model may
-      // reject.
+      // know): there is nothing to step down to. The route may still hold a
+      // lowered value from an earlier perturbation, so leave recovery armed.
       if (index === -1 || index === ladder.length - 1) return config
+      // Only the FIRST perturbation of a series records the base: a second
+      // collapse steps down from the already-lowered value, and recovery must
+      // still return to the true original.
+      if (state.baseEffort === undefined) state.baseEffort = String(current)
+      state.perturbedTo = ladder[index + 1]
+      state.restorePending = true
       return { ...config, reasoningEffort: ladder[index + 1] }
     })
   })
