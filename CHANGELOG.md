@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.1.3
+
+- **Package metadata completed.** `repository`, `homepage`, `bugs` and `author`
+  were absent, so the npm page carried no link back to this repository. (They
+  were added once before and then dropped when `package.json` was rewritten for
+  1.2.0 — which is why the fix is called out here rather than assumed.)
+- **The description was stale.** It still described v1's behaviour ("truncates
+  the stream at the collapse point"); v2 discards the whole attempt and retries,
+  and the package now also strips garbage code points and can decontaminate a
+  session retroactively. All three are named now.
+
+No behavioural change.
+
+
 ## 2.1.2
 
 - **The activation line now goes to `console.log`, not `ctx.logger.info`.** The

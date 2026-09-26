@@ -1,7 +1,7 @@
 {
   "name": "dsh-guard-repeat-output",
-  "version": "2.1.2",
-  "description": "Host-side degenerate-repetition guard for DSH: detects repetition collapse in a streaming model reply, truncates the stream at the collapse point, and drives the agent to continue from there.",
+  "version": "2.1.3",
+  "description": "Host-side degeneration guard for DSH: strips garbage code points from the stream, detects repetition collapse and discards the attempt before any of it enters history, and can retroactively decontaminate a session that was already poisoned.",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -25,6 +25,15 @@
     "cordis-plugin"
   ],
   "license": "MIT",
+  "author": "Mcd0LUO",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mcd0LUO/dsh-guard-repeat-output.git"
+  },
+  "homepage": "https://github.com/Mcd0LUO/dsh-guard-repeat-output#readme",
+  "bugs": {
+    "url": "https://github.com/Mcd0LUO/dsh-guard-repeat-output/issues"
+  },
   "engines": {
     "node": ">=20"
   },
