@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.1.5
+
+- **The Chinese README was rewritten for readability.** The first pass was a
+  literal translation of the English text, which left it dense and full of
+  jargon a Chinese reader had to decode. It now leads with a plain-language
+  summary, explains each mechanism in ordinary wording, and drops detail that
+  only matters when editing the source.
+- **Corrected two numbers in the English README.** The incident table cited
+  `"let me write the call"` × 1,951; the actual count is **1,952**. The quoted
+  phrases are now reproduced exactly as they appear in the captured text
+  (capitalised, with the trailing period), so the counts can be verified by
+  search rather than guessed at.
+- Both READMEs now state the measured production result — 12 real collapses
+  caught, all 12 recovered, none of the discarded text reached session history —
+  instead of leaving the reader to infer it.
+
+No behavioural change.
+
+
 ## 2.1.4
 
 - **Fixed: a blank `modelIncludes` silently widened the scope to every model.**

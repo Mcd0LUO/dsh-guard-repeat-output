@@ -22,14 +22,17 @@ This is not a rare edge case. Two real incidents captured on a production server
 
 | Length | Shape |
 |---|---|
-| 1,371,962 chars | `"let me produce"` × 27,269 — pure repetition |
-| 250,506 chars | `"let me write"` × 1,958 alternating with `"let me write the call"` × 1,951 |
+| 1,371,962 chars | `"Let me produce."` × 27,269 — pure repetition |
+| 250,506 chars | `"Let me write."` × 1,958 alternating with `"Let me write the call."` × 1,952 |
 
 Nothing in the loop noticed. The turn kept generating — and billing — until the model happened
 to stop on its own, or a human pressed cancel. Every one of those tokens then sits in the
 context window, crowding out the work that actually mattered.
 
 ## What it does
+
+In about two days on a production server it caught **12 real collapses**: all 12 recovered,
+none failed, and **none of the discarded text ever reached the session history**.
 
 The guard evaluates a sliding window of the stream as it arrives, and acts on three levels.
 
