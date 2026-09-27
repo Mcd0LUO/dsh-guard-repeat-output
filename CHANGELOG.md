@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.1.4
+
+- **Fixed: a blank `modelIncludes` silently widened the scope to every model.**
+  `[]` deliberately means "every model", but `['   ']` — a list the caller clearly
+  meant to narrow — was filtered to empty and therefore matched everything too.
+  That is the opposite of the intent and the dangerous direction, because every
+  threshold is calibrated on DeepSeek output alone. A non-empty list whose entries
+  all normalize away is now rejected with an error that names the empty-array
+  alternative. `truncateChannels` was checked for the same class of bug and is
+  safe: it matches exactly, so an unmatched entry disables truncation rather than
+  enabling it everywhere.
+- **Chinese README** (`README.zh-CN.md`) with a language switcher in both files.
+- `verify/config.mjs` — 23 checks covering scope validation, numeric ranges and
+  boolean flags, so a future edit cannot quietly reintroduce the fail-open.
+
+
 ## 2.1.3
 
 - **Package metadata completed.** `repository`, `homepage`, `bugs` and `author`

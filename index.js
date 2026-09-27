@@ -750,6 +750,19 @@ function resolveConfig(raw) {
   if (!Array.isArray(resolved.modelIncludes) || resolved.modelIncludes.some(p => typeof p !== 'string')) {
     throw new Error(`${name}: \`modelIncludes\` must be an array of strings`)
   }
+  // An EMPTY array means "every model" (see `inScope`). A NON-empty array whose
+  // entries all normalize away is not that: the caller was trying to narrow the
+  // scope and a typo (`['   ']`) would silently widen it to everything — the
+  // opposite of the intent, and the dangerous direction, because the thresholds
+  // are calibrated on DeepSeek output only. Reject it instead of guessing.
+  if (resolved.modelIncludes.length > 0
+    && resolved.modelIncludes.every(pattern => pattern.trim().length === 0)) {
+    throw new Error(
+      `${name}: \`modelIncludes\` has ${resolved.modelIncludes.length} entr`
+      + `${resolved.modelIncludes.length === 1 ? 'y' : 'ies'} but all are blank. `
+      + 'Use an empty array to match every model, or name at least one pattern.',
+    )
+  }
   if (resolved.minWindowChars > resolved.windowChars) {
     throw new Error(`${name}: \`minWindowChars\` must not exceed \`windowChars\``)
   }

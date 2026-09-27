@@ -5,6 +5,8 @@
 A host-side guard for [DSH](https://github.com/deepseek-ai) that watches the model's output
 stream and cuts off degenerate repetition the moment it starts.
 
+**Language:** English | [简体中文](./README.zh-CN.md)
+
 ---
 
 ## The problem
