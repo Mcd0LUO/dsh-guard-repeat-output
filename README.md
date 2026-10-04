@@ -94,20 +94,42 @@ falsifiable rather than becoming folklore.
 
 ## Install
 
+**Through the DSH Web UI (recommended).** Open **Plugins** in the sidebar, install
+`dsh-guard-repeat-output`, and enable it. The manager reads the package's
+`dsh.bundle` declaration and registers it as a profile layer — there is nothing to
+write by hand.
+
+**By hand.** Installing the package and registering it as a layer are two separate
+steps, and skipping the second one leaves the plugin installed but never loaded:
+
 ```bash
-npm install dsh-guard-repeat-output
+dsh plugin --profile web add dsh-guard-repeat-output
 ```
 
-Then mount it in your DSH profile. The package ships a Cordis patch layer:
+```jsonc
+// <profile>/package.json — add the package NAME to the bundle list
+"dsh": { "profile": { "bundles": [
+  "@deepseek-ai/dsh-base",
+  "@deepseek-ai/dsh-web-app",
+  "dsh-guard-repeat-output"
+] } }
+```
+
+Do **not** copy a config block in. The package ships its own patch
+([`cordis.patch.yml`](./cordis.patch.yml)) holding every default, and that patch is
+what inserts the row.
+
+### Changing the defaults
+
+Every default is already applied by the package's own patch. To override one, add an
+id-targeted patch to your profile's `cordis.patch.yml` — the user layer is applied
+after every bundle layer:
 
 ```yaml
-- insert:
-    - id: guard-repeat-output
-      name: 'dsh-guard-repeat-output'
-      config:
-        # see cordis.patch.yml for the full annotated default set
-        truncateChannels: ['reasoning']
-        maxDegenerationRetries: 2
+- id: guard-repeat-output
+  config:
+    maxDegenerationRetries: 3
+    modelIncludes: ['deepseek', 'glm']
 ```
 
 ## Configuration

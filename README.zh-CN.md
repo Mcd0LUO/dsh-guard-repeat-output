@@ -74,20 +74,34 @@ let me write the call let me write the call let me write the call ...
 
 ## 安装
 
+**推荐：在 DSH 网页界面里装。** 打开侧边栏的「插件」，安装 `dsh-guard-repeat-output` 并启用。管理器会读取包里的 `dsh.bundle` 声明，自动把它注册成一个 profile 层——**不需要你写任何配置**。
+
+**手动安装。** 装包和注册成插件层是**两件独立的事**，只做前一件的话，包装上了但永远不会被加载：
+
 ```bash
-npm install dsh-guard-repeat-output
+dsh plugin --profile web add dsh-guard-repeat-output
 ```
 
-然后在 DSH profile 里挂载。包内自带配置文件：
+```jsonc
+// <profile>/package.json —— 把包名加进 bundle 列表
+"dsh": { "profile": { "bundles": [
+  "@deepseek-ai/dsh-base",
+  "@deepseek-ai/dsh-web-app",
+  "dsh-guard-repeat-output"
+] } }
+```
+
+**不要**把配置块抄进去。包内已经自带一份完整的 patch（[`cordis.patch.yml`](./cordis.patch.yml)），包含所有默认值，插件行就是它插入的。
+
+### 改默认值
+
+所有默认值都由包内的 patch 生效了。要改某一项，往你 profile 的 `cordis.patch.yml` 里加一段按 id 定位的 patch 即可——用户层会在所有 bundle 层之后应用：
 
 ```yaml
-- insert:
-    - id: guard-repeat-output
-      name: 'dsh-guard-repeat-output'
-      config:
-        # 完整的默认值和说明见 cordis.patch.yml
-        truncateChannels: ['reasoning']
-        maxDegenerationRetries: 2
+- id: guard-repeat-output
+  config:
+    maxDegenerationRetries: 3
+    modelIncludes: ['deepseek', 'glm']
 ```
 
 ## 配置

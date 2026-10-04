@@ -9,10 +9,15 @@
         windowChars: 2400
         minWindowChars: 1200
         minSegments: 24
-        minSegmentChars: 12
+        # NOTE: there is deliberately no minimum segment LENGTH. A segment is kept
+        # whenever it carries a letter or digit, however short, because a collapse
+        # repeating `OK.` / `Let me run.` lives entirely below any useful length
+        # floor — and because `duplicateShare` is computed over the segments that
+        # survive, dropping the repeaters made the collapse look VARIED (a live
+        # `OK.` x44 loop scored 0.60 and never convicted).
         phraseRun: 8
         phraseTopCount: 10
-        lowInfoDupShare: 0.85
+        lowInfoDupShare: 0.80
         maxUniqueGramRatio: 0.30
         gramK: 5
         evalEveryChars: 200

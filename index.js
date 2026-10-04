@@ -51,8 +51,8 @@
  *
  * ## Detection rule — two signals must BOTH hold
  *
- * The window is split on sentence terminators into segments; segments shorter
- * than `minSegmentChars` are noise and dropped.
+ * The window is split on sentence terminators into segments; fragments carrying
+ * no letter or digit (bare punctuation) are noise and dropped.
  *
  *   1. **phrase leg** — longest run of byte-identical consecutive segments
  *      >= `phraseRun`, OR the most frequent segment occurs >= `phraseTopCount`.
@@ -148,10 +148,9 @@ export const DEFAULTS = Object.freeze({
   windowChars: 2400,
   minWindowChars: 1200,
   minSegments: 24,
-  minSegmentChars: 12,
   phraseRun: 8,
   phraseTopCount: 10,
-  lowInfoDupShare: 0.85,
+  lowInfoDupShare: 0.80,
   maxUniqueGramRatio: 0.3,
   /**
    * Consecutive non-repeated segments tolerated inside a degenerate run before
@@ -240,6 +239,9 @@ const SEGMENT_BREAK = /[.!?\n;。！？；]+/
 /** Everything that is not a letter or digit (CJK included); used for the k-gram ratio. */
 const NON_WORD = /[^0-9a-z\u4e00-\u9fff]+/g
 
+/** Does a fragment contain at least one letter or digit (CJK included)? */
+const WORD_CHAR = /[0-9a-z\u4e00-\u9fff]/
+
 /** Lowercase and collapse whitespace so formatting cannot hide a repetition. */
 function normalize(text) {
   return text.toLowerCase().replace(/\s+/g, ' ')
@@ -261,16 +263,28 @@ function rawWindowOf(text, thresholds) {
 }
 
 /**
- * Split a RAW window into usable segments, dropping sub-threshold noise.
+ * Split a RAW window into usable segments, dropping fragments with no word.
  *
  * Each segment is normalized after splitting (not before), so segments that
  * differ only in case or internal spacing still compare equal.
+ *
+ * A fragment is kept when it carries at least one letter or digit — a word,
+ * however short. The old rule dropped every segment shorter than
+ * `minSegmentChars` (12) to discard punctuation noise. But a short sentence is
+ * not noise, and the degenerate pattern migrated to exactly those: `OK.` (2)
+ * and `Let me run.` (10) both fell under the floor, so they disappeared from
+ * BOTH legs. Worse, `duplicateShare` is computed over the segments that
+ * SURVIVE, so discarding the repeaters inflated the apparent variety of what
+ * remained: measured on live traffic, a real collapse looping `OK.` 44 times
+ * scored a duplicate share of 0.60 and never convicted. Testing for a word
+ * character rejects punctuation noise directly, without discarding short
+ * sentences.
  */
-function segmentsOf(rawWindow, thresholds) {
+function segmentsOf(rawWindow) {
   return rawWindow
     .split(SEGMENT_BREAK)
     .map(part => normalize(part).trim())
-    .filter(part => part.length >= thresholds.minSegmentChars)
+    .filter(part => WORD_CHAR.test(part))
 }
 
 /** Longest run of consecutive identical segments. */
@@ -366,7 +380,7 @@ export function degenerationOnset(text, thresholds) {
   let match
   while ((match = scan.exec(text)) !== null) {
     const normalized = normalize(match[0]).trim()
-    if (normalized.length < thresholds.minSegmentChars) continue
+    if (!WORD_CHAR.test(normalized)) continue
     segments.push({ start: match.index, text: normalized })
   }
   if (segments.length === 0) return text.length
@@ -410,7 +424,7 @@ export function evaluateRepetitionWindow(text, thresholds, channel = 'text') {
   const limits = thresholds ?? DEFAULTS
   const window = rawWindowOf(text, limits)
   if (window.length < limits.minWindowChars) return null
-  const segments = segmentsOf(window, limits)
+  const segments = segmentsOf(window)
   if (segments.length < limits.minSegments) return null
   const stats = segmentStats(segments)
   const unique = uniqueGramRatio(window, limits)
@@ -716,7 +730,7 @@ export async function appendRecord(logPath, record) {
 function resolveConfig(raw) {
   const input = raw ?? {}
   const resolved = { ...DEFAULTS, ...input }
-  for (const key of ['windowChars', 'minWindowChars', 'minSegments', 'minSegmentChars',
+  for (const key of ['windowChars', 'minWindowChars', 'minSegments',
     'phraseRun', 'phraseTopCount', 'gramK', 'evalEveryChars', 'maxTruncationsPerTurn']) {
     const value = resolved[key]
     if (!Number.isInteger(value) || value < 1) {

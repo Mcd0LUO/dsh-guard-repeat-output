@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.1.6
+
+- **Fixed: short-sentence repetition collapse stopped being detected, so the
+  guard no longer discarded the bad attempt or re-issued the call.** The detector
+  dropped every segment shorter than `minSegmentChars` (12), intending to discard
+  punctuation noise. When the degenerate pattern migrated from long clauses
+  (`Let me write the call.`) to short ones (`OK.` / `Let me run.`), every segment
+  of a collapse fell under that floor. The damage was worse than a miss: because
+  `duplicateShare` is computed over the segments that *survive*, discarding the
+  repeaters made the collapse look **varied** instead of repetitive. A real
+  collapse looping `OK.` 44 times scored a duplicate share of 0.60 and never
+  convicted. Segments are now kept whenever they carry a letter or digit, however
+  short; only bare punctuation is dropped. `minSegmentChars` is removed, and
+  `degenerationOnset` uses the same rule so detection and pruning agree.
+- **`lowInfoDupShare` 0.85 → 0.80.** With the corrected segmentation the share is
+  measured over the same segment set the phrase leg uses; 0.85 was tuned against
+  the old, length-filtered statistic.
+- Measured, not assumed. On the frozen corpus (62 real collapses, 1708 real
+  legitimate reasoning parts) plus **146 collapses captured live** under the new
+  pattern: the fixed detector convicts **62/62**, **146/146**, **0/1708** false
+  positives. The previous build caught **0/146** of the live collapses.
+- Production impact: 144 collapses in a single session between 2026-09-29 and
+  2026-10-02 were silently allowed through (22 on 09-30, 106 on 10-01, 15 on
+  10-02), which is why the guard log goes quiet from 09-29 onward.
+
 ## 2.1.5
 
 - **The Chinese README was rewritten for readability.** The first pass was a

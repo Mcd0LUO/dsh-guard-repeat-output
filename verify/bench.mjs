@@ -9,8 +9,7 @@
  * Run with: node --expose-gc bench.mjs
  */
 const CONFIG = {
-  windowChars: 2400, minWindowChars: 1200, minSegments: 24, minSegmentChars: 12,
-  phraseRun: 8, phraseTopCount: 10, lowInfoDupShare: 0.85, maxUniqueGramRatio: 0.3,
+  windowChars: 2400, minWindowChars: 1200, minSegments: 24, phraseRun: 8, phraseTopCount: 10, lowInfoDupShare: 0.85, maxUniqueGramRatio: 0.3,
   gramK: 5, evalEveryChars: 200, onsetGapSegments: 2, holdbackChars: 4096,
   modelIncludes: [], truncate: true, continueOnTruncate: true,
   maxTruncationsPerTurn: 2, logPath: null,
