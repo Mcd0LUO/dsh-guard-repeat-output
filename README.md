@@ -92,6 +92,43 @@ turn. A guard whose recovery can kill the turn is worse than one that only disca
 [`verify/effort-necessity.mjs`](./verify/effort-necessity.mjs) is kept so the claim stays
 falsifiable rather than becoming folklore.
 
+## Compatibility
+
+**Supported DSH range: `>=0.1.6-alpha.2 <0.3.0-0`.**
+
+| DSH | Status |
+| --- | --- |
+| `0.2.1-alpha.2` | verified — boots, guard active, config resolves |
+| `0.2.0-rc.2` | verified — live traffic (the convictions recorded in [`CHANGELOG.md`](./CHANGELOG.md) were captured on it) |
+| `0.1.6-alpha.2` … `0.2.0-rc.1` | declared floor, matching the sibling plugins; not machine-verified |
+| `>=0.3.0-0` | **not supported** |
+
+The plugin imports nothing from `@deepseek-ai/*` — only Node built-ins and its own
+modules — so it carries no package-level version coupling. What it does couple to
+is four host seams:
+
+| Seam | Used for |
+| --- | --- |
+| `llm/stream` | wrapping the delta stream — the whole live guard hangs off this |
+| `agent/request-error` | re-issuing a discarded attempt |
+| `agent/pre-step` | the per-step retry budget and the continuation message |
+| `commands`, via `ctx.inject` | registering `/guard-cleanup` |
+
+`agents` and `sessionQuery` are read through `ctx.get(...)`, which returns
+`undefined` rather than throwing, so a missing service degrades one feature instead
+of breaking the boot. A host that renames or removes one of the four seams above is
+a breaking change for this plugin.
+
+The package declares this range as a `peerDependencies` entry on
+`@deepseek-ai/dsh`, so DSH's plugin-manager compatibility gate **enforces** it:
+installing or activating outside the range is refused up front rather than failing
+later at runtime. The gate compares the range against the running DSH version with
+**prereleases included**, so the alpha and rc versions listed above are matched
+rather than skipped. Refusal is not permanent — the plugin manager can grant an
+exact-version exemption (`dsh plugin allow-version`, or the Plugin Manager UI) once
+you accept the risk, which is the right move only after checking that the host
+seams above are unchanged.
+
 ## Install
 
 **Through the DSH Web UI (recommended).** Open **Plugins** in the sidebar, install

@@ -72,6 +72,30 @@ let me write the call let me write the call let me write the call ...
 
 测量脚本保留在 [`verify/effort-necessity.mjs`](./verify/effort-necessity.mjs)，你可以自己复现这个结论。
 
+## 兼容性
+
+**支持的 DSH 版本范围：`>=0.1.6-alpha.2 <0.3.0-0`。**
+
+| DSH | 状态 |
+| --- | --- |
+| `0.2.1-alpha.2` | 已验证——能启动、guard 处于 active、配置可解析 |
+| `0.2.0-rc.2` | 已验证——真实流量（[`CHANGELOG.md`](./CHANGELOG.md) 里记的那些定罪就是它跑出来的） |
+| `0.1.6-alpha.2` … `0.2.0-rc.1` | 声明的下界，与同作者另两个插件一致；未做机器验证 |
+| `>=0.3.0-0` | **不支持** |
+
+这个插件不从 `@deepseek-ai/*` 里 import 任何东西——只依赖 Node 内置模块和自身文件——所以没有包层面的版本耦合。它真正耦合的是四个宿主接缝：
+
+| 接缝 | 用途 |
+| --- | --- |
+| `llm/stream` | 包住 delta 流——整个实时防护就挂在这里 |
+| `agent/request-error` | 重新发起被丢弃的那次尝试 |
+| `agent/pre-step` | 每步的重试预算与续写消息 |
+| `commands`（经 `ctx.inject`） | 注册 `/guard-cleanup` |
+
+`agents` 和 `sessionQuery` 都通过 `ctx.get(...)` 读取，取不到只会返回 `undefined` 而不会抛错，所以某个服务缺失只会让对应功能退化，不会让插件起不来。但宿主一旦改名或移除上面这四个接缝，对本插件就是破坏性变更。
+
+包里把这个范围声明成了对 `@deepseek-ai/dsh` 的 `peerDependencies`，所以 DSH 插件管理器的兼容闸门会**强制**它：在范围外的版本上安装或启用会被直接拒绝，而不是等到运行时才失败。闸门比较时**包含预发布版本**，所以上面列的 alpha / rc 版本能正常匹配，不会被跳过。拒绝并非永久——确认风险后可以用插件管理器授予「精确版本豁免」（`dsh plugin allow-version`，或插件管理器界面）。只有在核对过上面那几个宿主接缝确实没变之后，才该这么做。
+
 ## 安装
 
 **推荐：在 DSH 网页界面里装。** 打开侧边栏的「插件」，安装 `dsh-guard-repeat-output` 并启用。管理器会读取包里的 `dsh.bundle` 声明，自动把它注册成一个 profile 层——**不需要你写任何配置**。

@@ -72,6 +72,15 @@ console.log('\n=== numeric ranges ===')
   check('garbageRatio above 1 is rejected', applyWith({ garbageRatio: 1.5 }) !== null)
   check('garbageRatio 0 is legal', applyWith({ garbageRatio: 0 }) === null)
   check('garbageRunChars 0 is rejected', applyWith({ garbageRunChars: 0 }) !== null)
+  check('garbageWindowChars 0 is rejected', applyWith({ garbageWindowChars: 0 }) !== null)
+  check('a negative garbageWindowChars is rejected', applyWith({ garbageWindowChars: -1 }) !== null)
+  check('garbageMinChars 0 is legal (ratio leg always armed)',
+    applyWith({ garbageMinChars: 0 }) === null)
+  check('a negative garbageMinChars is rejected', applyWith({ garbageMinChars: -1 }) !== null)
+  check('garbageMinChars above garbageWindowChars is rejected',
+    applyWith({ garbageMinChars: 5000, garbageWindowChars: 2400 }) !== null)
+  check('garbageMinChars equal to garbageWindowChars is legal',
+    applyWith({ garbageMinChars: 2400, garbageWindowChars: 2400 }) === null)
   check('minWindowChars above windowChars is rejected',
     applyWith({ minWindowChars: 9999, windowChars: 100 }) !== null)
 }

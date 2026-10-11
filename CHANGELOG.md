@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.1.7
+
+- **Fixed: the garbage RATIO leg judged a ratio on a sample of one, so a single
+  stray U+FFFD discarded a whole attempt and could end the turn.** The ratio leg
+  compared `removed / deltaLength` against `garbageRatio` (0.5) with no volume
+  floor. A one-code-unit delta holding one blacklisted code unit therefore scored
+  a ratio of 1.0 and convicted — precisely the "one stray U+FFFD is a decoding
+  hiccup, not a collapse" case `lib/sanitize.js` says must be cleaned silently.
+  All seven convictions in the first nine days of live traffic came from this leg,
+  on deltas of 1-10 code units, none with an unbroken run longer than 9; three of
+  the four incident clusters exhausted `maxDegenerationRetries` and ended the
+  turn. Every discarded block was coherent reasoning: the model was quoting
+  corrupted bytes while debugging an encoding problem, which a blacklist cannot
+  tell apart from a collapsing model.
+- **Garbage evidence is now measured over an accumulated window, not one delta.**
+  `garbageWindowChars` (2400) caps the trailing RAW text the ratio is computed
+  over; `garbageMinChars` (600) is the volume below which the ratio leg stays
+  silent. The RUN leg is deliberately NOT gated — 32 NUL bytes in a row is a
+  collapse whether or not the window has filled. Measuring over a window rather
+  than over a single delta also closes the blind spot a per-delta length floor
+  would open: a burst split across many small deltas still reaches the floor.
+- `sanitizeText` now also reports `inputChars`, and `isSevereGarbageWindow`
+  replaces `isSevereGarbage` in the live path. `isSevereGarbage` is unchanged and
+  still exported.
+- Measured, not assumed. The seven live convictions are replayed in
+  `verify/maintenance.mjs` with the healthy text each window actually held: all
+  seven are now silent, while a 32-code-unit run, a 200-NUL burst and a
+  0.5-ratio window all still convict. `verify/maintenance.mjs` and
+  `verify/config.mjs` pass; `verify/cross-platform.mjs` keeps its three
+  pre-existing Windows failures, unchanged by this release.
+- **The supported DSH range is now declared, and therefore enforced.**
+  `peerDependencies` carries `@deepseek-ai/dsh: ">=0.1.6-alpha.2 <0.3.0-0"`, which
+  DSH's plugin-manager compatibility gate checks against the running version with
+  prereleases included. Installing or activating outside the range is refused up
+  front instead of failing later at runtime. The range, the verified versions and
+  the four host seams it rests on are documented in both READMEs.
+
 ## 2.1.6
 
 - **Fixed: short-sentence repetition collapse stopped being detected, so the

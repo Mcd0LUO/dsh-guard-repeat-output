@@ -90,12 +90,24 @@
         # from every delta before it is forwarded and can never reach the log.
         # Unlike repetition this needs no statistical judgement — a blacklist
         # decides it exactly — so it is always safe. A DENSE burst (a long
-        # unbroken run, or a high share of one delta) is collapse evidence in its
-        # own right: a model that emits 200 NUL bytes in a row is gone, whether or
-        # not it also loops. One stray U+FFFD is a decoding hiccup, not a collapse.
+        # unbroken run, or a high share of the accumulated window) is collapse
+        # evidence in its own right: a model that emits 200 NUL bytes in a row is
+        # gone, whether or not it also loops. One stray U+FFFD is a decoding
+        # hiccup, not a collapse — and the ratio leg now needs a window big enough
+        # for a ratio to mean anything, so a delta of one code unit can no longer
+        # score 1.0 and discard the attempt.
         sanitizeGarbage: true
         garbageRunChars: 32
         garbageRatio: 0.5
+        # The garbage ratio is measured over this much accumulated RAW text, not
+        # over one delta. Measuring over a window rather than over a single delta
+        # also closes the blind spot a per-delta length floor would open: a burst
+        # split across many small deltas still reaches the floor.
+        garbageWindowChars: 2400
+        # Below this window size the RATIO leg stays silent. The RUN leg is
+        # deliberately not gated: 32 NUL bytes in a row is a collapse whether or
+        # not the window has filled.
+        garbageMinChars: 600
 
         # Register the /guard-cleanup command, which shadows already-persisted
         # degenerate reasoning so it stops being replayed. The live guard prevents

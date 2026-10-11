@@ -90,7 +90,7 @@
 
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve, win32 } from 'node:path'
-import { sanitizeText, isSevereGarbage } from './lib/sanitize.js'
+import { sanitizeText, isSevereGarbageWindow } from './lib/sanitize.js'
 import { findDegenerateMessages, cleanupNote } from './lib/cleanup.js'
 
 /** Plugin id used by Loader diagnostics and stamped on the messages this plugin injects. */
@@ -219,8 +219,27 @@ export const DEFAULTS = Object.freeze({
   sanitizeGarbage: true,
   /** An unbroken garbage run this long marks the delta as collapse evidence. */
   garbageRunChars: 32,
-  /** A garbage share this high within one delta marks it as collapse evidence. */
+  /** A garbage share this high within the garbage window marks it as collapse evidence. */
   garbageRatio: 0.5,
+  /**
+   * How much accumulated RAW text the garbage ratio is measured over.
+   *
+   * The phrase leg has always had a volume floor (`minWindowChars` /
+   * `minSegments`); the garbage leg had none, so it judged a ratio on a sample of
+   * one. Live traffic showed the cost: all seven convictions in the first nine
+   * days came from a delta of 1-10 code units, the shortest being a single stray
+   * U+FFFD that scored a ratio of 1.0 and discarded the whole attempt — the exact
+   * "decoding hiccup" the design says must be cleaned silently.
+   */
+  garbageWindowChars: 2400,
+  /**
+   * Window size below which the garbage RATIO leg stays silent.
+   *
+   * The run leg is deliberately not gated: 32 NUL bytes in a row is a collapse
+   * whether or not the window has filled yet. Only the ratio needs a sample big
+   * enough for a ratio to mean anything.
+   */
+  garbageMinChars: 600,
   /**
    * Register the `/guard-cleanup` command, which shadows already-persisted
    * degenerate reasoning so it stops being replayed. The live guard prevents new
@@ -786,6 +805,15 @@ function resolveConfig(raw) {
   if (typeof resolved.garbageRatio !== 'number' || resolved.garbageRatio < 0 || resolved.garbageRatio > 1) {
     throw new Error(`${name}: \`garbageRatio\` must be a number in [0,1], got ${String(resolved.garbageRatio)}`)
   }
+  if (!Number.isInteger(resolved.garbageWindowChars) || resolved.garbageWindowChars < 1) {
+    throw new Error(`${name}: \`garbageWindowChars\` must be an integer >= 1`)
+  }
+  if (!Number.isInteger(resolved.garbageMinChars) || resolved.garbageMinChars < 0) {
+    throw new Error(`${name}: \`garbageMinChars\` must be an integer >= 0`)
+  }
+  if (resolved.garbageMinChars > resolved.garbageWindowChars) {
+    throw new Error(`${name}: \`garbageMinChars\` must not exceed \`garbageWindowChars\``)
+  }
   for (const key of ['sanitizeGarbage', 'cleanupCommand']) {
     if (typeof resolved[key] !== 'boolean') {
       throw new Error(`${name}: \`${key}\` must be a boolean`)
@@ -949,6 +977,13 @@ export function apply(ctx, config) {
     let head = 0
     let heldText = 0
     let heldChannel = null
+    /**
+     * Trailing RAW text the garbage ratio is measured over, garbage included.
+     *
+     * Scoped to the attempt, exactly like the held run above: a discarded attempt
+     * must not leave its garbage in the window that judges the retry.
+     */
+    let garbageWindow = ''
     let seenChars = 0
     /**
      * Everything this attempt has emitted, kept ONLY to write the sidecar copy.
@@ -1062,14 +1097,28 @@ export function apply(ctx, config) {
         if (thresholds.sanitizeGarbage && text.length > 0) {
           const cleaned = sanitizeText(text)
           if (cleaned.removed > 0) {
-            garbageSevere = isSevereGarbage(cleaned, thresholds.garbageRunChars, thresholds.garbageRatio)
+            // Evidence is measured over accumulated RAW text, not this one delta.
+            // A burst split across many small deltas still reaches the volume
+            // floor, and a lone hiccup inside a one-code-unit delta can no longer
+            // score a ratio of 1.0 and discard the whole attempt.
+            garbageWindow += text
+            if (garbageWindow.length > thresholds.garbageWindowChars) {
+              garbageWindow = garbageWindow.slice(garbageWindow.length - thresholds.garbageWindowChars)
+            }
+            const windowed = sanitizeText(garbageWindow)
+            garbageSevere = isSevereGarbageWindow(
+              windowed,
+              thresholds.garbageRunChars,
+              thresholds.garbageRatio,
+              thresholds.garbageMinChars,
+            )
             text = cleaned.text
             // A chunk is producer-owned and may be frozen, so never mutate it.
             effective = { ...chunk, text }
             garbageEvidence = {
               kind: 'garbage', channel,
-              removed: cleaned.removed, maxRun: cleaned.maxRun,
-              duplicateShare: cleaned.ratio,
+              removed: windowed.removed, maxRun: windowed.maxRun,
+              duplicateShare: windowed.ratio,
             }
             if (garbageSevere) {
               logConviction(state, garbageEvidence, options, agent, seenChars, startedAt, false, 0, 'garbage-collapse')

@@ -5,7 +5,7 @@
 // modules the guard loads at runtime.
 //
 // Usage: node verify/maintenance.mjs
-import { sanitizeText, isSevereGarbage } from '../lib/sanitize.js'
+import { sanitizeText, isSevereGarbageWindow } from '../lib/sanitize.js'
 import { reasoningVerdict, findDegenerateMessages, cleanupNote } from '../lib/cleanup.js'
 import { DEFAULTS } from '../index.js'
 
@@ -48,27 +48,72 @@ console.log('\n=== SANITIZE: blacklisted code points are removed, not judged ===
   check('clean text is untouched and reports nothing', clean.removed === 0 && clean.text === 'ordinary prose')
 }
 
-console.log('\n=== SANITIZE: only DENSE garbage is treated as collapse ===')
+console.log('\n=== SANITIZE: only DENSE, SUSTAINED garbage is treated as collapse ===')
 {
   // One stray replacement char is a decoding hiccup, not a collapse.
   const hiccup = sanitizeText('a'.repeat(500) + '\uFFFD')
   check('a single stray replacement char is NOT severe',
-    isSevereGarbage(hiccup, 32, 0.5) === false,
+    isSevereGarbageWindow(hiccup, 32, 0.5, 600) === false,
     `removed=${hiccup.removed} ratio=${hiccup.ratio.toFixed(4)}`)
 
-  // An unbroken run of NULs means the model is gone.
+  // An unbroken run of NULs means the model is gone. The run leg is NOT
+  // volume-gated, so a single dense burst convicts even in a tiny window.
   const burst = sanitizeText('a' + '\u0000'.repeat(200))
   check('a long unbroken run IS severe',
-    isSevereGarbage(burst, 32, 0.5) === true,
+    isSevereGarbageWindow(burst, 32, 0.5, 600) === true,
     `maxRun=${burst.maxRun}`)
 
-  // A high share of garbage within one delta is also collapse.
-  const dense = sanitizeText('\u0000'.repeat(10) + 'ab')
-  check('a dense share IS severe',
-    isSevereGarbage(dense, 32, 0.5) === true,
-    `ratio=${dense.ratio.toFixed(4)}`)
+  const shortBurst = sanitizeText('\u0000'.repeat(32))
+  check('a 32-code-unit run convicts even in a 32-code-unit window',
+    isSevereGarbageWindow(shortBurst, 32, 0.5, 600) === true,
+    `maxRun=${shortBurst.maxRun} inputChars=${shortBurst.inputChars}`)
 
-  check('zero removals is never severe', isSevereGarbage(sanitizeText('ok'), 32, 0.5) === false)
+  // A dense share convicts once the window is big enough for a ratio to mean
+  // anything. Interleaved so the RUN leg cannot fire: this isolates the ratio.
+  const denseFilled = sanitizeText('\u0000x'.repeat(350))
+  check('a dense share IS severe once the window has volume',
+    isSevereGarbageWindow(denseFilled, 32, 0.5, 600) === true,
+    `maxRun=${denseFilled.maxRun} ratio=${denseFilled.ratio.toFixed(4)} inputChars=${denseFilled.inputChars}`)
+
+  check('zero removals is never severe', isSevereGarbageWindow(sanitizeText('ok'), 32, 0.5, 600) === false)
+
+  /* ---- SEMANTIC CHANGE: a dense burst in a window with no volume ---------- *
+   * The previous suite asserted the opposite with exactly this fixture, and that
+   * assertion is what let live traffic convict on a one-code-unit delta.
+   */
+  const tinyDense = sanitizeText('\u0000'.repeat(10) + 'ab')
+  check('a dense share in a 12-code-unit window is NOT severe',
+    isSevereGarbageWindow(tinyDense, 32, 0.5, 600) === false,
+    `ratio=${tinyDense.ratio.toFixed(4)} inputChars=${tinyDense.inputChars}`)
+
+  /* ---- Regression: the seven real convictions, 2026-10-03 .. 2026-10-11 --- *
+   * Every one arrived as a delta of 1-10 code units whose garbage share was
+   * 0.667-1.0, i.e. it convicted purely on the ratio leg (no run ever reached
+   * 32). The discarded text was coherent reasoning in all seven cases — the
+   * model was quoting corrupted bytes while debugging an encoding problem, which
+   * a blacklist cannot tell apart from a collapsing model. Each case is replayed
+   * with the healthy text that preceded it, which is what the window held.
+   */
+  const HEALTHY = 'the loader rejects the malformed frame before writing. '
+  const real = [
+    { when: '10-03 22:54', removed: 2, maxRun: 2, ratio: 0.6667, delta: '\u0000\u0000x' },
+    { when: '10-05 13:33', removed: 1, maxRun: 1, ratio: 1, delta: '\uFFFD' },
+    { when: '10-11 14:09', removed: 9, maxRun: 9, ratio: 0.9, delta: '\u0000'.repeat(9) + 'x' },
+    { when: '10-11 14:09', removed: 4, maxRun: 4, ratio: 0.8, delta: '\u0000'.repeat(4) + 'x' },
+  ]
+  for (const c of real) {
+    const delta = sanitizeText(c.delta)
+    check(`replay ${c.when}: the logged delta reproduces removed=${c.removed} maxRun=${c.maxRun} ratio=${c.ratio}`,
+      delta.removed === c.removed && delta.maxRun === c.maxRun
+        && Math.abs(delta.ratio - c.ratio) < 0.001,
+      `got removed=${delta.removed} maxRun=${delta.maxRun} ratio=${delta.ratio.toFixed(4)}`)
+
+    // ~758 healthy characters is what the window held at the 10-11 conviction.
+    const windowed = sanitizeText(HEALTHY.repeat(14) + c.delta)
+    check(`replay ${c.when}: NOT severe over the real window`,
+      isSevereGarbageWindow(windowed, 32, 0.5, 600) === false,
+      `windowRatio=${windowed.ratio.toFixed(4)} inputChars=${windowed.inputChars}`)
+  }
 }
 
 /* ------------------------------------------------------------------ *
